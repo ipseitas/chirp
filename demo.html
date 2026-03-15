@@ -82,9 +82,48 @@ canvas{width:100%;background:#080808;border-radius:4px;display:block}
 .energy-bar.active{background:#2563eb}
 .energy-bar.hot{background:#f59e0b}
 .threshold-line{position:relative;height:0;border-top:1px dashed #dc262666}
+
+.cal-overlay{position:fixed;inset:0;background:#0a0a0aee;z-index:200;display:flex;align-items:center;justify-content:center}
+.cal-card{background:#111;border:1px solid #333;border-radius:12px;padding:32px 40px;max-width:480px;width:90%;text-align:center}
+.cal-card h2{font-size:18px;color:#e0e0e0;margin-bottom:8px;font-family:system-ui,sans-serif}
+.cal-card p{color:#888;font-size:13px;margin-bottom:20px;line-height:1.5}
+.cal-progress-track{height:6px;background:#1a1a1a;border-radius:3px;overflow:hidden;margin-bottom:12px}
+.cal-progress-bar{height:100%;background:#2563eb;border-radius:3px;transition:width 0.2s;width:0%}
+.cal-status{font-size:12px;color:#555;margin-bottom:20px}
+.cal-bars{display:flex;gap:1px;align-items:flex-end;height:80px;background:#050505;border-radius:6px;padding:4px;margin-bottom:8px}
+.cal-bar{flex:1;background:#1e293b;border-radius:1px 1px 0 0;min-width:3px;transition:height 0.15s}
+.cal-bar.noisy{background:#f59e0b}
+.cal-bar.clean{background:#16a34a44}
+.cal-freq-labels{display:flex;justify-content:space-between;font-size:8px;color:#444;margin-bottom:16px}
+.cal-error{color:#f87171;font-size:13px;margin-bottom:16px}
+
+.noise-profile-bars{display:flex;gap:1px;align-items:flex-end;height:50px;background:#050505;border-radius:4px;padding:2px}
+.np-bar{flex:1;border-radius:1px 1px 0 0;min-width:3px}
+.np-bar.clean{background:#16a34a44}
+.np-bar.mild{background:#f59e0b44}
+.np-bar.noisy{background:#f5710044}
+.np-bar.avoid{background:#dc262666}
 </style>
 </head>
 <body>
+
+<!-- CALIBRATION OVERLAY (shown until room sampling completes) -->
+<div class="cal-overlay" id="cal-overlay">
+  <div class="cal-card">
+    <h2 id="cal-title">Room calibration</h2>
+    <p id="cal-desc">Listening to the room to establish a noise baseline.<br>Please stay quiet for best results.</p>
+    <div class="cal-bars" id="cal-bars"></div>
+    <div class="cal-freq-labels">
+      <span>1.0k</span><span>2.2k</span><span>3.4k</span><span>4.6k</span><span>5.8k</span><span>7.0k</span><span>8.6k</span>
+    </div>
+    <div class="cal-progress-track">
+      <div class="cal-progress-bar" id="cal-progress"></div>
+    </div>
+    <div class="cal-status" id="cal-status">Requesting microphone access...</div>
+    <div class="cal-error" id="cal-error" style="display:none"></div>
+    <button class="btn-ghost" onclick="skipCalibration()" style="font-size:11px">Skip calibration</button>
+  </div>
+</div>
 <!-- Top bar -->
 <div class="top-bar">
   <h1>SonicLink</h1>
@@ -184,6 +223,16 @@ canvas{width:100%;background:#080808;border-radius:4px;display:block}
       </div>
     </div>
 
+    <!-- Noise profile (from room calibration) -->
+    <div class="section">
+      <h3>Room noise profile <span class="badge" id="np-status-badge">uncalibrated</span></h3>
+      <div class="noise-profile-bars" id="np-bars"></div>
+      <div style="display:flex;justify-content:space-between;margin-top:2px;font-size:9px;color:#444">
+        <span>1.0k</span><span>1.8k</span><span>2.6k</span><span>3.4k</span><span>4.2k</span><span>5.0k</span><span>5.8k</span><span>6.6k</span><span>7.4k</span><span>8.6k</span>
+      </div>
+      <div style="margin-top:6px;font-size:10px;color:#555" id="np-summary"></div>
+    </div>
+
     <!-- Tone heatmap (history) -->
     <div class="section">
       <h3>Tone heatmap <span class="badge">last 32 symbols</span></h3>
@@ -223,6 +272,12 @@ window.toggleTrace = (on) => { TRACE = on; };
 const diag = {
   framesTx: 0, framesRx: 0, crcFail: 0, retx: 0, bytesTx: 0, bytesRx: 0,
   threshold: 0, barkerCorr: 0, phase: 'idle', noiseFloor: 0,
+  // Room noise profile: per-tone average energy from calibration
+  noiseProfile: new Float32Array(20),   // mean energy per tone slot
+  noiseProfileMax: new Float32Array(20), // peak energy per tone slot
+  noiseProfileReady: false,
+  noisyTones: new Set(),    // tone indices with high ambient noise
+  cleanTones: [],           // tone indices safe to use
   logCount: 0, demodLogCount: 0,
   // Waveform ring buffer (last ~50ms of RX audio)
   waveformBuf: new Float32Array(2400),
@@ -667,7 +722,7 @@ const DETECT_ONOFF_RATIO = 8;       // Gate 4: minimum ON/OFF energy ratio
 const DETECT_ON_NOISE_RATIO = 30;   // Gate 5: ON avg must be this × noise floor
 
 class FSKDemodulator {
-  constructor() {
+  constructor(noiseProfile) {
     this.buf = new Float32Array(0);
     this.bufLen = 0;
     this.state = 'scanning';
@@ -682,11 +737,20 @@ class FSKDemodulator {
     this.scanStep = Math.floor(TOTAL_SYMBOL_SAMPLES / 2);
     this.fftBuf = new Float32Array(1024);
 
-    // Noise floor tracking
-    this.noiseFloor = 0.001; // conservative initial estimate
-    this.noiseAlpha = 0.005; // EMA smoothing factor (slow adaptation)
-    this.noiseSamples = 0;   // how many measurements we've taken
-    this.scansSinceDetect = 0; // consecutive low-energy scans
+    // Noise floor tracking — seed from calibration if available
+    this.noiseProfile = noiseProfile || null;
+    if (this.noiseProfile) {
+      // Use median of calibrated per-tone noise as initial floor
+      const sorted = [...this.noiseProfile].filter(v => v > 0).sort((a,b) => a-b);
+      this.noiseFloor = sorted.length > 0 ? sorted[Math.floor(sorted.length / 2)] : 0.001;
+      dlog(`Demod init: noise profile loaded (floor=${this.noiseFloor.toExponential(2)}, ${this.noiseProfile.filter(v => v > 0).length} tones)`, 'info');
+    } else {
+      this.noiseFloor = 0.001;
+      dlog(`Demod init: no noise profile, using default floor`, 'warn');
+    }
+    this.noiseAlpha = 0.005;
+    this.noiseSamples = this.noiseProfile ? 50 : 0; // pretend we have samples if calibrated
+    this.scansSinceDetect = 0;
   }
 
   _grow(samples) {
@@ -949,7 +1013,8 @@ class FSKDemodulator {
     this.buf = new Float32Array(0); this.bufLen = 0; this.state = 'scanning';
     this.symbolStart = 0; this.chipEnergies = []; this.firstChipPos = 0;
     this.symbolBuffer = []; this.expectedBytes = 0; this.decodedFrames = [];
-    this.scanPos = 0; this.noiseFloor = 0.001; this.noiseSamples = 0;
+    this.scanPos = 0;
+    // Preserve noiseFloor and noiseProfile — they don't change between transfers
     this.scansSinceDetect = 0;
   }
 }
@@ -1106,7 +1171,7 @@ window.startSend = async function() {
     plog(`Sending ${data.length} bytes: "${text.length > 50 ? text.slice(0,50)+'...' : text}"`, 'info');
     plog(`Mode: ${simplex ? 'simplex (no echo)' : 'half-duplex'}`, 'info');
 
-    demodulator = new FSKDemodulator();
+    demodulator = new FSKDemodulator(diag.noiseProfileReady ? diag.noiseProfile : null);
     await initAudio(!simplex);
     if (!simplex) rxResume();
 
@@ -1185,7 +1250,7 @@ window.startReceive = async function() {
   document.getElementById('recv-output').value = '';
 
   try {
-    demodulator = new FSKDemodulator();
+    demodulator = new FSKDemodulator(diag.noiseProfileReady ? diag.noiseProfile : null);
     await initAudio(true);
     rxResume();
     setPhase('idle');
@@ -1292,9 +1357,249 @@ for (let i = 0; i < 16; i++) {
   ebCont.appendChild(bar);
 }
 
+// Init noise profile bars
+const npCont = document.getElementById('np-bars');
+for (let i = 0; i < NUM_TONES; i++) {
+  const bar = document.createElement('div');
+  bar.className = 'np-bar clean';
+  bar.title = `${TONES[i]} Hz`;
+  bar.style.height = '2px';
+  npCont.appendChild(bar);
+}
+
+// Init calibration bars
+const calBars = document.getElementById('cal-bars');
+for (let i = 0; i < NUM_TONES; i++) {
+  const bar = document.createElement('div');
+  bar.className = 'cal-bar';
+  bar.style.height = '2px';
+  calBars.appendChild(bar);
+}
+
+// ╔══════════════════════════════════════════════════════════════════════════╗
+// ║  ROOM CALIBRATION                                                       ║
+// ╚══════════════════════════════════════════════════════════════════════════╝
+//
+// On page load: request mic, listen for 5 seconds, measure per-tone Goertzel
+// energy at every TOTAL_SYMBOL_SAMPLES interval. Build a noise profile:
+//   - Mean energy per tone (baseline)
+//   - Max energy per tone (peak transients)
+//   - Classify tones as clean / mild / noisy / avoid
+//   - Set noiseFloor for the demodulator
+//
+// The noise profile is stored in diag.noiseProfile and passed to the
+// demodulator when it's created.
+
+const CAL_DURATION_MS = 5000;
+const CAL_SAMPLE_INTERVAL = TOTAL_SYMBOL_SAMPLES; // one measurement per symbol period
+
+// Buttons start disabled until calibration completes
+document.getElementById('btn-send').disabled = true;
+document.getElementById('btn-recv').disabled = true;
+
+async function runCalibration() {
+  const overlay = document.getElementById('cal-overlay');
+  const progressBar = document.getElementById('cal-progress');
+  const statusEl = document.getElementById('cal-status');
+  const errorEl = document.getElementById('cal-error');
+  const titleEl = document.getElementById('cal-title');
+
+  try {
+    statusEl.textContent = 'Requesting microphone access...';
+
+    // Get mic
+    const calStream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
+    });
+
+    statusEl.textContent = 'Microphone active. Sampling room noise...';
+
+    const calCtx = new AudioContext({ sampleRate: SAMPLE_RATE });
+    const calSource = calCtx.createMediaStreamSource(calStream);
+
+    // Use a ScriptProcessorNode for simplicity during calibration
+    // (no need for the worklet's complexity here)
+    const bufferSize = 4096;
+    const processor = calCtx.createScriptProcessor(bufferSize, 1, 1);
+    calSource.connect(processor);
+    processor.connect(calCtx.destination);
+
+    // Accumulate samples
+    const allSamples = [];
+    const startTime = Date.now();
+
+    // Per-tone accumulators
+    const toneSums = new Float64Array(NUM_TONES);
+    const toneMaxes = new Float32Array(NUM_TONES);
+    const toneSumsSq = new Float64Array(NUM_TONES); // for variance
+    let measurementCount = 0;
+
+    // Accumulation buffer for symbol-aligned measurements
+    let accumBuf = new Float32Array(0);
+    let accumLen = 0;
+
+    await new Promise((resolve) => {
+      processor.onaudioprocess = (e) => {
+        const input = e.inputBuffer.getChannelData(0);
+        const elapsed = Date.now() - startTime;
+        const pct = Math.min(100, (elapsed / CAL_DURATION_MS) * 100);
+        progressBar.style.width = pct + '%';
+        statusEl.textContent = `Sampling... ${(elapsed / 1000).toFixed(1)}s / ${(CAL_DURATION_MS / 1000).toFixed(0)}s — ${measurementCount} measurements`;
+
+        // Append to accumulation buffer
+        if (accumLen + input.length > accumBuf.length) {
+          const nb = new Float32Array(Math.max(accumBuf.length * 2, accumLen + input.length + SAMPLE_RATE));
+          nb.set(accumBuf.subarray(0, accumLen));
+          accumBuf = nb;
+        }
+        accumBuf.set(input, accumLen);
+        accumLen += input.length;
+
+        // Process complete symbol periods
+        while (accumLen >= CAL_SAMPLE_INTERVAL + SYMBOL_SAMPLES) {
+          // Measure all tones at the current position
+          for (let t = 0; t < NUM_TONES; t++) {
+            const e = goertzelEnergy(accumBuf, 0, SYMBOL_SAMPLES, TONES[t], SAMPLE_RATE);
+            toneSums[t] += e;
+            toneSumsSq[t] += e * e;
+            if (e > toneMaxes[t]) toneMaxes[t] = e;
+          }
+          measurementCount++;
+
+          // Update live calibration bars
+          if (measurementCount % 3 === 0) {
+            const bars = calBars.children;
+            let maxAvg = 0;
+            for (let t = 0; t < NUM_TONES; t++) {
+              const avg = toneSums[t] / measurementCount;
+              if (avg > maxAvg) maxAvg = avg;
+            }
+            if (maxAvg < 1e-10) maxAvg = 1e-10;
+            for (let t = 0; t < bars.length; t++) {
+              const avg = toneSums[t] / measurementCount;
+              const pct = Math.min(100, (avg / maxAvg) * 100);
+              bars[t].style.height = Math.max(2, pct) + '%';
+              bars[t].className = 'cal-bar' + (pct > 60 ? ' noisy' : ' clean');
+            }
+          }
+
+          // Advance
+          accumBuf.copyWithin(0, CAL_SAMPLE_INTERVAL, accumLen);
+          accumLen -= CAL_SAMPLE_INTERVAL;
+        }
+
+        if (elapsed >= CAL_DURATION_MS) {
+          processor.onaudioprocess = null;
+          resolve();
+        }
+      };
+    });
+
+    // Clean up calibration audio
+    processor.disconnect();
+    calSource.disconnect();
+    calStream.getTracks().forEach(t => t.stop());
+    await calCtx.close();
+
+    // ── Compute final noise profile ──
+    if (measurementCount < 5) {
+      throw new Error('Not enough measurements (need at least 5)');
+    }
+
+    let overallMean = 0;
+    const noisySet = new Set();
+    const cleanList = [];
+    const profileData = [];
+
+    for (let t = 0; t < NUM_TONES; t++) {
+      const mean = toneSums[t] / measurementCount;
+      const variance = (toneSumsSq[t] / measurementCount) - (mean * mean);
+      const stddev = Math.sqrt(Math.max(0, variance));
+      diag.noiseProfile[t] = mean;
+      diag.noiseProfileMax[t] = toneMaxes[t];
+      overallMean += mean;
+
+      profileData.push({ tone: t, freq: TONES[t], mean, max: toneMaxes[t], stddev });
+    }
+    overallMean /= NUM_TONES;
+
+    // Classify tones:
+    //   clean:  mean < overallMean * 2
+    //   mild:   mean < overallMean * 5
+    //   noisy:  mean < overallMean * 15
+    //   avoid:  mean >= overallMean * 15
+    for (const p of profileData) {
+      const ratio = p.mean / Math.max(overallMean, 1e-10);
+      if (ratio >= 15) { p.cls = 'avoid'; noisySet.add(p.tone); }
+      else if (ratio >= 5) { p.cls = 'noisy'; noisySet.add(p.tone); }
+      else if (ratio >= 2) { p.cls = 'mild'; cleanList.push(p.tone); }
+      else { p.cls = 'clean'; cleanList.push(p.tone); }
+    }
+
+    diag.noisyTones = noisySet;
+    diag.cleanTones = cleanList;
+    diag.noiseFloor = overallMean;
+    diag.noiseProfileReady = true;
+
+    // Update noise profile display
+    const npBars = document.getElementById('np-bars').children;
+    let npMax = 0;
+    for (let t = 0; t < NUM_TONES; t++) npMax = Math.max(npMax, diag.noiseProfile[t]);
+    if (npMax < 1e-10) npMax = 1e-10;
+    for (let t = 0; t < NUM_TONES; t++) {
+      const pct = Math.min(100, (diag.noiseProfile[t] / npMax) * 100);
+      npBars[t].style.height = Math.max(2, pct) + '%';
+      npBars[t].className = 'np-bar ' + profileData[t].cls;
+    }
+    document.getElementById('np-status-badge').textContent = `${measurementCount} samples, ${noisySet.size} noisy`;
+    document.getElementById('np-summary').innerHTML =
+      `Floor: ${overallMean.toExponential(2)} | ` +
+      `Clean: ${cleanList.length}/${NUM_TONES} | ` +
+      `Noisy: <span style="color:#f59e0b">${noisySet.size}</span> ` +
+      (noisySet.size > 0 ? `(${[...noisySet].map(t => (TONES[t]/1000).toFixed(1) + 'k').join(', ')})` : '');
+
+    // Log to protocol log
+    plog(`Room calibration: ${measurementCount} measurements over ${(CAL_DURATION_MS/1000).toFixed(0)}s`, 'info');
+    plog(`Noise floor: ${overallMean.toExponential(2)}`, 'info');
+    if (noisySet.size > 0) {
+      plog(`Noisy tones: ${[...noisySet].map(t => TONES[t] + 'Hz').join(', ')}`, 'warn');
+    }
+    plog(`Clean tones: ${cleanList.length}/${NUM_TONES}`, 'info');
+
+    // Success — hide overlay, enable buttons
+    titleEl.textContent = 'Calibration complete';
+    statusEl.textContent = `${cleanList.length}/${NUM_TONES} tones usable`;
+    progressBar.style.width = '100%';
+    progressBar.style.background = '#16a34a';
+
+    await new Promise(r => setTimeout(r, 600));
+    overlay.style.display = 'none';
+    document.getElementById('btn-send').disabled = false;
+    document.getElementById('btn-recv').disabled = false;
+
+  } catch (err) {
+    console.error('Calibration error:', err);
+    errorEl.textContent = err.message || 'Calibration failed';
+    errorEl.style.display = 'block';
+    statusEl.textContent = 'Failed — you can skip calibration and proceed with defaults.';
+    // Still allow user to proceed
+  }
+}
+
+window.skipCalibration = function() {
+  document.getElementById('cal-overlay').style.display = 'none';
+  document.getElementById('btn-send').disabled = false;
+  document.getElementById('btn-recv').disabled = false;
+  document.getElementById('np-status-badge').textContent = 'skipped';
+  plog('Calibration skipped — using default noise profile', 'warn');
+};
+
 // Start animation loop
 animLoop();
 plog('Dashboard ready', 'info');
+
+// Auto-start calibration
+runCalibration();
 </script>
 </body>
 </html>
