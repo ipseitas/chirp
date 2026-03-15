@@ -150,6 +150,7 @@ canvas{width:100%;background:#080808;border-radius:4px;display:block}
         <button class="btn-primary" id="btn-send" onclick="startSend()">Send</button>
         <button class="btn-success" id="btn-recv" onclick="startReceive()">Receive</button>
         <button class="btn-danger" onclick="stopTransfer()" id="btn-stop" style="display:none">Stop</button>
+        <button class="btn-ghost" id="btn-loopback" onclick="runLoopbackTest()">⟳ Loopback test</button>
         <div class="spacer" style="flex:1"></div>
         <label><input type="checkbox" id="simplex-mode" checked> Simplex</label>
       </div>
@@ -1432,6 +1433,354 @@ window.stopTransfer = async function() {
   document.getElementById('btn-send').disabled = false;
   document.getElementById('btn-recv').disabled = false;
   document.getElementById('btn-stop').style.display = 'none';
+};
+
+// ╔══════════════════════════════════════════════════════════════════════════╗
+// ║  LOOPBACK TEST — pure software, no mic/speakers                         ║
+// ╚══════════════════════════════════════════════════════════════════════════╝
+//
+// Generates random data, encodes to audio samples, feeds directly into the
+// demodulator as if they came from the mic. If this fails → software bug.
+// If this passes but real audio fails → acoustic channel problem.
+
+window.runLoopbackTest = async function() {
+  if (isRunning) return;
+  isRunning = true;
+  resetDiag();
+  setPhase('idle');
+  document.getElementById('btn-send').disabled = true;
+  document.getElementById('btn-recv').disabled = true;
+  document.getElementById('btn-loopback').disabled = true;
+  document.getElementById('recv-section').style.display = 'block';
+  document.getElementById('recv-output').value = '';
+
+  plog('═══ LOOPBACK TEST START ═══', 'state');
+  plog('No mic/speakers — encoding → samples → demodulator directly', 'info');
+
+  const testResults = { total: 0, pass: 0, fail: 0, details: [] };
+
+  function result(name, ok, detail) {
+    testResults.total++;
+    if (ok) { testResults.pass++; plog(`  ✓ ${name}`, 'success'); }
+    else { testResults.fail++; plog(`  ✗ ${name}: ${detail}`, 'error'); }
+    testResults.details.push({ name, ok, detail });
+  }
+
+  try {
+    // ── Test 1: Single frame round-trip ──
+    plog('Test 1: Single frame encode → decode', 'state');
+    {
+      const demod = new FSKDemodulator(null);
+      const payload = new Uint8Array([0x48, 0x65, 0x6C, 0x6C, 0x6F]); // "Hello"
+      const frame = encodeFrame(FRAME.DATA, 0, payload);
+      const audio = encodeToAudio(frame);
+
+      plog(`  Frame: ${frame.length}B, audio: ${audio.length} samples (${(audio.length/SAMPLE_RATE*1000).toFixed(0)}ms)`, 'debug');
+      if (DEBUG) {
+        diag.txHexBytes.push(...frame);
+        renderHex('tx-hex', diag.txHexBytes, 'tx-hex-badge');
+      }
+
+      // Feed audio into demodulator in realistic chunk sizes (128 samples like worklet)
+      const decoded = [];
+      for (let i = 0; i < audio.length; i += 128) {
+        const chunk = audio.subarray(i, Math.min(i + 128, audio.length));
+        const frames = demod.feedSamples(chunk);
+        for (const raw of frames) {
+          const dec = decodeFrame(raw);
+          if (dec) decoded.push(dec);
+          else {
+            const hdr = Array.from(raw.slice(0,8)).map(b=>b.toString(16).padStart(2,'0')).join(' ');
+            dlog(`  CRC fail: ${raw.length}B hdr=[${hdr}]`, 'error');
+            // Compute expected vs actual
+            const rawLen = raw[1] | (raw[2] << 8);
+            if (rawLen <= MAX_PAYLOAD && raw.length >= 4 + rawLen + 4) {
+              const pe = 4 + rawLen;
+              const expCrc = crc32(raw.subarray(0, pe));
+              const gotCrc = ((raw[pe])|(raw[pe+1]<<8)|(raw[pe+2]<<16)|(raw[pe+3]<<24)) >>> 0;
+              dlog(`  expected_crc=0x${expCrc.toString(16).padStart(8,'0')} got=0x${gotCrc.toString(16).padStart(8,'0')}`, 'error');
+            }
+          }
+        }
+      }
+
+      if (decoded.length === 0) {
+        result('Single frame', false, 'No frames decoded');
+      } else if (decoded.length > 1) {
+        result('Single frame', false, `Expected 1 frame, got ${decoded.length}`);
+      } else {
+        const d = decoded[0];
+        const payloadMatch = d.payload.length === payload.length &&
+          d.payload.every((b, i) => b === payload[i]);
+        if (d.type !== FRAME.DATA) result('Single frame', false, `Type mismatch: got 0x${d.type.toString(16)} expected 0x${FRAME.DATA.toString(16)}`);
+        else if (d.seq !== 0) result('Single frame', false, `Seq mismatch: got ${d.seq} expected 0`);
+        else if (!payloadMatch) {
+          const gotHex = Array.from(d.payload.slice(0,16)).map(b=>b.toString(16).padStart(2,'0')).join(' ');
+          const expHex = Array.from(payload.slice(0,16)).map(b=>b.toString(16).padStart(2,'0')).join(' ');
+          result('Single frame', false, `Payload mismatch:\n    got=[${gotHex}]\n    exp=[${expHex}]`);
+        }
+        else result('Single frame', true);
+      }
+    }
+
+    // ── Test 2: SEED frame (64 bytes) ──
+    plog('Test 2: SEED frame (64B payload)', 'state');
+    {
+      const demod = new FSKDemodulator(null);
+      const seed = new Uint8Array(SEED_LENGTH);
+      crypto.getRandomValues(seed);
+      const frame = encodeFrame(FRAME.SEED, 0, seed);
+      const audio = encodeToAudio(frame);
+
+      plog(`  Seed: ${Array.from(seed.slice(0,8)).map(b=>b.toString(16).padStart(2,'0')).join(' ')}...`, 'debug');
+
+      const decoded = [];
+      for (let i = 0; i < audio.length; i += 128) {
+        const chunk = audio.subarray(i, Math.min(i + 128, audio.length));
+        for (const raw of demod.feedSamples(chunk)) {
+          const dec = decodeFrame(raw);
+          if (dec) decoded.push(dec);
+          else dlog(`  SEED CRC fail (${raw.length}B)`, 'error');
+        }
+      }
+
+      if (decoded.length !== 1) {
+        result('SEED frame', false, `Got ${decoded.length} frames`);
+      } else {
+        const match = decoded[0].payload.length === seed.length &&
+          decoded[0].payload.every((b, i) => b === seed[i]);
+        result('SEED frame', match, match ? '' : `Payload mismatch at ${seed.length}B`);
+      }
+    }
+
+    // ── Test 3: Full CHALLENGE (512 bytes, multiple frames) ──
+    plog('Test 3: CHALLENGE frames (512B across multiple frames)', 'state');
+    {
+      const demod = new FSKDemodulator(null);
+      const seed = new Uint8Array(SEED_LENGTH);
+      crypto.getRandomValues(seed);
+      const challenge = await deriveTestBlock(seed, 0);
+
+      // Split into frames just like the sender does
+      const frames = [];
+      for (let o = 0; o < challenge.length; o += MAX_PAYLOAD) {
+        const chunk = challenge.slice(o, Math.min(o + MAX_PAYLOAD, challenge.length));
+        frames.push(encodeFrame(FRAME.CHALLENGE, frames.length, chunk));
+      }
+
+      plog(`  ${frames.length} frames, ${challenge.length}B total`, 'debug');
+
+      // Encode each frame to audio and feed sequentially
+      const decoded = [];
+      for (let f = 0; f < frames.length; f++) {
+        const audio = encodeToAudio(frames[f]);
+        for (let i = 0; i < audio.length; i += 128) {
+          const chunk = audio.subarray(i, Math.min(i + 128, audio.length));
+          for (const raw of demod.feedSamples(chunk)) {
+            const dec = decodeFrame(raw);
+            if (dec) decoded.push(dec);
+            else dlog(`  CHALLENGE frame ${f} CRC fail (${raw.length}B)`, 'error');
+          }
+        }
+      }
+
+      if (decoded.length !== frames.length) {
+        result('CHALLENGE multi-frame', false, `Expected ${frames.length} frames, got ${decoded.length}`);
+      } else {
+        // Reassemble and compare
+        const reassembled = new Uint8Array(challenge.length);
+        let off = 0;
+        for (const d of decoded) { reassembled.set(d.payload, off); off += d.payload.length; }
+        const match = reassembled.every((b, i) => b === challenge[i]);
+        if (!match) {
+          let firstDiff = -1;
+          for (let i = 0; i < challenge.length; i++) {
+            if (reassembled[i] !== challenge[i]) { firstDiff = i; break; }
+          }
+          result('CHALLENGE multi-frame', false, `Mismatch at byte ${firstDiff}: got 0x${reassembled[firstDiff].toString(16)} expected 0x${challenge[firstDiff].toString(16)}`);
+        } else {
+          result('CHALLENGE multi-frame', true);
+        }
+      }
+    }
+
+    // ── Test 4: DATA with simplex 3× redundancy ──
+    plog('Test 4: DATA 3× simplex redundancy + deduplication', 'state');
+    {
+      const demod = new FSKDemodulator(null);
+      const payload = new TextEncoder().encode('Hello, world!');
+      const frame = encodeFrame(FRAME.DATA, 42, payload);
+
+      const decoded = [];
+      for (let rep = 0; rep < 3; rep++) {
+        const audio = encodeToAudio(frame);
+        for (let i = 0; i < audio.length; i += 128) {
+          const chunk = audio.subarray(i, Math.min(i + 128, audio.length));
+          for (const raw of demod.feedSamples(chunk)) {
+            const dec = decodeFrame(raw);
+            if (dec) decoded.push(dec);
+            else dlog(`  DATA rep ${rep} CRC fail (${raw.length}B)`, 'error');
+          }
+        }
+      }
+
+      // Should get 3 identical frames
+      if (decoded.length !== 3) {
+        result('DATA 3× redundancy', false, `Expected 3 decoded frames, got ${decoded.length}`);
+      } else {
+        const allMatch = decoded.every(d =>
+          d.type === FRAME.DATA && d.seq === 42 &&
+          d.payload.length === payload.length &&
+          d.payload.every((b, i) => b === payload[i]));
+        result('DATA 3× redundancy', allMatch, allMatch ? '' : 'One or more copies differ');
+
+        // Deduplication check
+        const seenSeqs = new Set();
+        const unique = decoded.filter(d => { if (seenSeqs.has(d.seq)) return false; seenSeqs.add(d.seq); return true; });
+        result('Deduplication', unique.length === 1, unique.length === 1 ? '' : `Got ${unique.length} unique after dedup`);
+      }
+    }
+
+    // ── Test 5: Full protocol simulation ──
+    plog('Test 5: Full simplex protocol (seed → challenge → data)', 'state');
+    {
+      const demod = new FSKDemodulator(null);
+      const seed = new Uint8Array(SEED_LENGTH);
+      crypto.getRandomValues(seed);
+      const challenge = await deriveTestBlock(seed, 0);
+      const data = new TextEncoder().encode('Hello, world!');
+
+      // Build all frames in order
+      const allFrames = [];
+      allFrames.push(encodeFrame(FRAME.SEED, 0, seed));
+      for (let o = 0; o < challenge.length; o += MAX_PAYLOAD) {
+        const chunk = challenge.slice(o, Math.min(o + MAX_PAYLOAD, challenge.length));
+        allFrames.push(encodeFrame(FRAME.CHALLENGE, allFrames.length - 1, chunk));
+      }
+      for (let rep = 0; rep < 3; rep++) {
+        allFrames.push(encodeFrame(FRAME.DATA, 0, data));
+      }
+
+      plog(`  ${allFrames.length} total frames`, 'debug');
+
+      // Encode and feed all
+      const decoded = [];
+      for (const frame of allFrames) {
+        const audio = encodeToAudio(frame);
+        for (let i = 0; i < audio.length; i += 128) {
+          const chunk = audio.subarray(i, Math.min(i + 128, audio.length));
+          for (const raw of demod.feedSamples(chunk)) {
+            const dec = decodeFrame(raw);
+            if (dec) decoded.push(dec);
+            else dlog(`  Full sim CRC fail (${raw.length}B type=0x${raw[0].toString(16)})`, 'error');
+          }
+        }
+      }
+
+      plog(`  Decoded ${decoded.length}/${allFrames.length} frames`, 'debug');
+
+      // Verify seed
+      const seedFrames = decoded.filter(d => d.type === FRAME.SEED);
+      if (seedFrames.length !== 1) result('Full sim: SEED', false, `${seedFrames.length} seed frames`);
+      else {
+        const match = seedFrames[0].payload.every((b, i) => b === seed[i]);
+        result('Full sim: SEED', match, match ? '' : 'Seed payload mismatch');
+      }
+
+      // Verify challenge
+      const chalFrames = decoded.filter(d => d.type === FRAME.CHALLENGE);
+      const expectedChalFrames = Math.ceil(challenge.length / MAX_PAYLOAD);
+      if (chalFrames.length !== expectedChalFrames) {
+        result('Full sim: CHALLENGE', false, `${chalFrames.length}/${expectedChalFrames} frames`);
+      } else {
+        const reassembled = new Uint8Array(challenge.length);
+        let off = 0;
+        for (const c of chalFrames) { reassembled.set(c.payload, off); off += c.payload.length; }
+        const match = reassembled.every((b, i) => b === challenge[i]);
+        result('Full sim: CHALLENGE', match, match ? '' : 'Challenge data mismatch');
+      }
+
+      // Verify challenge with PRNG
+      const derivedChallenge = await deriveTestBlock(seedFrames.length === 1 ? seedFrames[0].payload : seed, 0);
+      if (chalFrames.length === expectedChalFrames) {
+        const reassembled = new Uint8Array(challenge.length);
+        let off = 0;
+        for (const c of chalFrames) { reassembled.set(c.payload, off); off += c.payload.length; }
+        const prngMatch = reassembled.every((b, i) => b === derivedChallenge[i]);
+        result('Full sim: PRNG verify', prngMatch, prngMatch ? '' : 'PRNG derivation mismatch');
+      }
+
+      // Verify data
+      const dataFrames = decoded.filter(d => d.type === FRAME.DATA);
+      if (dataFrames.length !== 3) {
+        result('Full sim: DATA', false, `${dataFrames.length}/3 data frames`);
+      } else {
+        const allMatch = dataFrames.every(d =>
+          d.payload.length === data.length && d.payload.every((b, i) => b === data[i]));
+        result('Full sim: DATA', allMatch, allMatch ? '' : 'Data payload mismatch');
+
+        if (allMatch) {
+          const text = new TextDecoder().decode(dataFrames[0].payload);
+          document.getElementById('recv-output').value = text;
+          document.getElementById('recv-bytes-badge').textContent = text.length + ' B';
+        }
+      }
+    }
+
+    // ── Test 6: Random payload sizes ──
+    plog('Test 6: Random payload sizes (1B, 13B, 64B, 127B)', 'state');
+    {
+      const sizes = [1, 13, 64, 127];
+      for (const sz of sizes) {
+        const demod = new FSKDemodulator(null);
+        const payload = new Uint8Array(sz);
+        crypto.getRandomValues(payload);
+        const frame = encodeFrame(FRAME.DATA, sz & 0xFF, payload);
+        const audio = encodeToAudio(frame);
+
+        const decoded = [];
+        for (let i = 0; i < audio.length; i += 128) {
+          const chunk = audio.subarray(i, Math.min(i + 128, audio.length));
+          for (const raw of demod.feedSamples(chunk)) {
+            const dec = decodeFrame(raw);
+            if (dec) decoded.push(dec);
+          }
+        }
+
+        if (decoded.length !== 1) {
+          result(`Payload ${sz}B`, false, `${decoded.length} frames decoded`);
+        } else {
+          const match = decoded[0].payload.length === sz &&
+            decoded[0].payload.every((b, i) => b === payload[i]);
+          result(`Payload ${sz}B`, match, match ? '' : 'Mismatch');
+        }
+      }
+    }
+
+    // ── Summary ──
+    plog('', 'info');
+    plog(`═══ LOOPBACK TEST COMPLETE ═══`, 'state');
+    plog(`${testResults.pass}/${testResults.total} passed, ${testResults.fail} failed`, testResults.fail === 0 ? 'success' : 'error');
+
+    if (testResults.fail === 0) {
+      plog('Software stack is CORRECT. If real audio fails, the problem is the acoustic channel.', 'success');
+    } else {
+      plog('Software bugs detected — fix these before testing with real audio.', 'error');
+      for (const d of testResults.details.filter(d => !d.ok)) {
+        plog(`  FAIL: ${d.name} — ${d.detail}`, 'error');
+      }
+    }
+
+  } catch (e) {
+    plog(`Loopback test error: ${e.message}`, 'error');
+    console.error(e);
+  } finally {
+    isRunning = false;
+    document.getElementById('btn-send').disabled = false;
+    document.getElementById('btn-recv').disabled = false;
+    document.getElementById('btn-loopback').disabled = false;
+    setPhase('idle');
+  }
 };
 
 function resetDiag() {
