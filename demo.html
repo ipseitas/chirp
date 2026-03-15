@@ -1,419 +1,837 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>SonicLink MVP Demo</title>
-  <style>
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    body {
-      font-family: system-ui, -apple-system, sans-serif;
-      background: #0f0f0f; color: #e0e0e0;
-      max-width: 800px; margin: 0 auto; padding: 24px;
-    }
-    h1 { font-size: 24px; margin-bottom: 8px; }
-    .subtitle { color: #888; margin-bottom: 24px; font-size: 14px; }
-    .panel {
-      background: #1a1a1a; border: 1px solid #333; border-radius: 8px;
-      padding: 20px; margin-bottom: 16px;
-    }
-    .panel h2 { font-size: 16px; margin-bottom: 12px; color: #ccc; }
-    label { display: block; font-size: 13px; color: #999; margin-bottom: 4px; }
-    textarea {
-      width: 100%; padding: 10px; background: #111; border: 1px solid #444;
-      border-radius: 4px; color: #e0e0e0; font-family: monospace; font-size: 14px;
-      resize: vertical; height: 80px;
-    }
-    button {
-      padding: 10px 20px; border: none; border-radius: 6px; font-size: 14px;
-      cursor: pointer; margin-top: 12px; margin-right: 8px; font-weight: 500;
-    }
-    .btn-send { background: #2563eb; color: white; }
-    .btn-send:hover { background: #1d4ed8; }
-    .btn-send:disabled { background: #333; color: #666; cursor: not-allowed; }
-    .btn-recv { background: #16a34a; color: white; }
-    .btn-recv:hover { background: #15803d; }
-    .btn-recv:disabled { background: #333; color: #666; cursor: not-allowed; }
-    .btn-stop { background: #dc2626; color: white; }
-    .btn-stop:hover { background: #b91c1c; }
-    .status {
-      margin-top: 12px; padding: 10px; background: #111; border-radius: 4px;
-      font-family: monospace; font-size: 13px; min-height: 40px;
-      max-height: 300px; overflow-y: auto;
-    }
-    .log-entry { margin-bottom: 2px; }
-    .log-state { color: #facc15; }
-    .log-progress { color: #60a5fa; }
-    .log-error { color: #f87171; }
-    .log-success { color: #4ade80; }
-    .log-info { color: #999; }
-    .mode-toggle { display: flex; gap: 8px; margin-bottom: 16px; }
-    .mode-toggle button {
-      flex: 1; margin: 0; padding: 12px; border: 2px solid #333;
-      background: #111; color: #888; font-size: 15px;
-    }
-    .mode-toggle button.active { border-color: #2563eb; color: #e0e0e0; background: #1e293b; }
-    .checkbox-row { margin-top: 8px; font-size: 13px; color: #999; }
-    .checkbox-row label { display: inline; }
-  </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SonicLink — Diagnostic Dashboard</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'SF Mono',SFMono-Regular,Menlo,Consolas,monospace;background:#0a0a0a;color:#ccc;font-size:13px}
+.top-bar{display:flex;align-items:center;gap:16px;padding:12px 16px;background:#111;border-bottom:1px solid #222;position:sticky;top:0;z-index:100}
+.top-bar h1{font-size:16px;color:#fff;font-weight:600}
+.top-bar .spacer{flex:1}
+.pill{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:12px;font-size:12px;font-weight:500}
+.pill.on{background:#16a34a33;color:#4ade80;border:1px solid #16a34a55}
+.pill.off{background:#33333366;color:#666;border:1px solid #333}
+.pill.warn{background:#a1620733;color:#facc15;border:1px solid #a1620755}
+
+.layout{display:grid;grid-template-columns:1fr 1fr;gap:1px;background:#222;min-height:calc(100vh - 49px)}
+.layout.single-col{grid-template-columns:1fr}
+.col{background:#0a0a0a;display:flex;flex-direction:column;min-width:0}
+
+.section{border-bottom:1px solid #1a1a1a;padding:10px 12px}
+.section h3{font-size:11px;text-transform:uppercase;letter-spacing:1px;color:#555;margin-bottom:8px;display:flex;align-items:center;gap:8px}
+.section h3 .badge{font-size:10px;padding:1px 6px;border-radius:4px;background:#222;color:#888;text-transform:none;letter-spacing:0}
+
+.controls{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.controls label{font-size:12px;color:#888;display:flex;align-items:center;gap:4px}
+.controls input[type=checkbox]{accent-color:#2563eb}
+.controls select,.controls input[type=text]{background:#111;border:1px solid #333;color:#ccc;padding:4px 8px;border-radius:4px;font-size:12px;font-family:inherit}
+.controls textarea{background:#111;border:1px solid #333;color:#ccc;padding:6px 8px;border-radius:4px;font-size:12px;font-family:inherit;width:100%;resize:vertical;height:50px}
+
+button{padding:6px 14px;border:none;border-radius:4px;font-size:12px;cursor:pointer;font-family:inherit;font-weight:500}
+.btn-primary{background:#2563eb;color:white}
+.btn-primary:hover{background:#1d4ed8}
+.btn-primary:disabled{background:#1e293b;color:#475569;cursor:not-allowed}
+.btn-danger{background:#dc2626;color:white}
+.btn-success{background:#16a34a;color:white}
+.btn-success:hover{background:#15803d}
+.btn-success:disabled{background:#14532d;color:#4a7c5c;cursor:not-allowed}
+.btn-ghost{background:transparent;color:#888;border:1px solid #333}
+.btn-ghost:hover{background:#1a1a1a;color:#ccc}
+
+canvas{width:100%;background:#080808;border-radius:4px;display:block}
+
+.log-area{background:#050505;border:1px solid #1a1a1a;border-radius:4px;padding:0;font-size:11px;max-height:250px;overflow-y:auto;overflow-x:hidden}
+.log-area .le{padding:1px 8px;border-bottom:1px solid #0d0d0d;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.le.trace{color:#444}
+.le.debug{color:#666}
+.le.info{color:#888}
+.le.state{color:#facc15}
+.le.progress{color:#60a5fa}
+.le.success{color:#4ade80}
+.le.error{color:#f87171}
+.le.warn{color:#fb923c}
+.le .ts{color:#333;margin-right:6px}
+
+.hex-view{background:#050505;border:1px solid #1a1a1a;border-radius:4px;padding:6px 8px;font-size:11px;max-height:150px;overflow-y:auto;white-space:pre;color:#666;line-height:1.5}
+.hex-view .offset{color:#444}
+.hex-view .byte{color:#888}
+.hex-view .byte.hi{color:#60a5fa}
+.hex-view .ascii{color:#555}
+
+.tone-grid{display:grid;gap:1px;background:#111;border-radius:4px;overflow:hidden}
+.tone-cell{padding:2px;text-align:center;font-size:9px;min-height:18px}
+
+.stat-row{display:flex;gap:16px;flex-wrap:wrap}
+.stat{display:flex;flex-direction:column;gap:2px}
+.stat .label{font-size:10px;color:#555;text-transform:uppercase;letter-spacing:0.5px}
+.stat .value{font-size:14px;color:#ccc;font-weight:500}
+.stat .value.good{color:#4ade80}
+.stat .value.bad{color:#f87171}
+.stat .value.warn{color:#facc15}
+
+.state-timeline{display:flex;gap:2px;margin-top:4px}
+.state-dot{width:8px;height:8px;border-radius:50%;background:#222}
+.state-dot.active{background:#2563eb;box-shadow:0 0 6px #2563eb88}
+.state-dot.done{background:#16a34a}
+.state-dot.error{background:#dc2626}
+
+.energy-bars{display:flex;gap:1px;align-items:flex-end;height:60px;background:#050505;border-radius:4px;padding:2px}
+.energy-bar{flex:1;background:#1e293b;border-radius:1px 1px 0 0;min-width:3px;transition:height 0.08s}
+.energy-bar.active{background:#2563eb}
+.energy-bar.hot{background:#f59e0b}
+.threshold-line{position:relative;height:0;border-top:1px dashed #dc262666}
+</style>
 </head>
 <body>
+<!-- Top bar -->
+<div class="top-bar">
   <h1>SonicLink</h1>
-  <p class="subtitle">Acoustic data transfer — MVP (robust FSK mode)</p>
+  <span style="color:#555">MVP diagnostic dashboard</span>
+  <div class="spacer"></div>
+  <label style="font-size:12px;color:#888;display:flex;align-items:center;gap:4px">
+    <input type="checkbox" id="debug-toggle" checked onchange="toggleDebug(this.checked)"> Debug
+  </label>
+  <label style="font-size:12px;color:#888;display:flex;align-items:center;gap:4px">
+    <input type="checkbox" id="trace-toggle" onchange="toggleTrace(this.checked)"> Trace
+  </label>
+  <span id="state-pill" class="pill off">IDLE</span>
+</div>
 
-  <div class="mode-toggle">
-    <button id="mode-send" class="active" onclick="setMode('send')">Sender</button>
-    <button id="mode-recv" onclick="setMode('recv')">Receiver</button>
+<!-- Main layout: left = control + protocol log, right = diagnostics -->
+<div class="layout" id="main-layout">
+
+  <!-- LEFT COLUMN: Controls + Protocol -->
+  <div class="col">
+    <!-- Mode + Controls -->
+    <div class="section">
+      <h3>Mode</h3>
+      <div class="controls" style="margin-bottom:8px">
+        <button class="btn-primary" id="btn-send" onclick="startSend()">Send</button>
+        <button class="btn-success" id="btn-recv" onclick="startReceive()">Receive</button>
+        <button class="btn-danger" onclick="stopTransfer()" id="btn-stop" style="display:none">Stop</button>
+        <div class="spacer" style="flex:1"></div>
+        <label><input type="checkbox" id="simplex-mode" checked> Simplex</label>
+      </div>
+      <div class="controls">
+        <label style="flex:1">
+          <span>Payload:</span>
+          <textarea id="send-input" style="margin-top:4px">Hello, world!</textarea>
+        </label>
+      </div>
+    </div>
+
+    <!-- Received output -->
+    <div class="section" id="recv-section" style="display:none">
+      <h3>Received <span class="badge" id="recv-bytes-badge">0 B</span></h3>
+      <textarea id="recv-output" readonly style="background:#050505;border-color:#1a1a1a;height:50px" placeholder="..."></textarea>
+    </div>
+
+    <!-- Protocol state -->
+    <div class="section">
+      <h3>Protocol state</h3>
+      <div class="state-timeline" id="state-timeline">
+        <div class="state-dot" id="st-idle" title="idle"></div>
+        <div class="state-dot" id="st-seed" title="seed"></div>
+        <div class="state-dot" id="st-challenge" title="challenge"></div>
+        <div class="state-dot" id="st-transfer" title="transfer"></div>
+        <div class="state-dot" id="st-done" title="done"></div>
+      </div>
+      <div class="stat-row" style="margin-top:10px" id="stats-row">
+        <div class="stat"><span class="label">Phase</span><span class="value" id="stat-phase">idle</span></div>
+        <div class="stat"><span class="label">Frames TX</span><span class="value" id="stat-frames-tx">0</span></div>
+        <div class="stat"><span class="label">Frames RX</span><span class="value" id="stat-frames-rx">0</span></div>
+        <div class="stat"><span class="label">CRC Fail</span><span class="value" id="stat-crc-fail">0</span></div>
+        <div class="stat"><span class="label">Retransmits</span><span class="value" id="stat-retx">0</span></div>
+        <div class="stat"><span class="label">Bytes TX</span><span class="value" id="stat-bytes-tx">0</span></div>
+        <div class="stat"><span class="label">Bytes RX</span><span class="value" id="stat-bytes-rx">0</span></div>
+        <div class="stat"><span class="label">Threshold</span><span class="value" id="stat-threshold">—</span></div>
+        <div class="stat"><span class="label">Barker Corr</span><span class="value" id="stat-barker">—</span></div>
+      </div>
+    </div>
+
+    <!-- Protocol log -->
+    <div class="section" style="flex:1">
+      <h3>Protocol log <span class="badge" id="log-count-badge">0</span></h3>
+      <div class="log-area" id="protocol-log"></div>
+    </div>
   </div>
 
-  <div id="send-panel" class="panel">
-    <h2>Send data</h2>
-    <label for="send-input">Text to send:</label>
-    <textarea id="send-input">Hello, world!</textarea>
-    <div class="checkbox-row">
-      <label><input type="checkbox" id="simplex-mode" checked> Force simplex (no echo/ACK)</label>
+  <!-- RIGHT COLUMN: Diagnostics -->
+  <div class="col" id="diag-col">
+    <!-- Waveform -->
+    <div class="section">
+      <h3>Waveform <span class="badge">RX input</span></h3>
+      <canvas id="waveform-canvas" height="100"></canvas>
     </div>
-    <button class="btn-send" id="btn-send" onclick="startSend()">Send</button>
-    <button class="btn-stop" onclick="stopTransfer()" style="display:none" id="btn-stop-send">Stop</button>
-    <div id="send-status" class="status">
-      <div class="log-entry log-info">Ready. Click Send to begin.</div>
+
+    <!-- Spectrum -->
+    <div class="section">
+      <h3>Spectrum <span class="badge">FFT magnitude</span></h3>
+      <canvas id="spectrum-canvas" height="120"></canvas>
+    </div>
+
+    <!-- Tone energies (per-symbol Goertzel) -->
+    <div class="section">
+      <h3>Tone energies <span class="badge" id="tone-symbol-badge">waiting</span></h3>
+      <div class="energy-bars" id="energy-bars-container">
+        <!-- 16 bars, populated by JS -->
+      </div>
+      <div style="display:flex;justify-content:space-between;margin-top:2px;font-size:9px;color:#444">
+        <span>1.4k</span><span>2.2k</span><span>3.0k</span><span>3.8k</span><span>4.6k</span><span>5.4k</span><span>6.2k</span><span>7.0k</span>
+      </div>
+    </div>
+
+    <!-- Tone heatmap (history) -->
+    <div class="section">
+      <h3>Tone heatmap <span class="badge">last 32 symbols</span></h3>
+      <canvas id="heatmap-canvas" height="80"></canvas>
+    </div>
+
+    <!-- Hex views -->
+    <div class="section">
+      <h3>TX hex <span class="badge" id="tx-hex-badge">0 B</span></h3>
+      <div class="hex-view" id="tx-hex"></div>
+    </div>
+    <div class="section">
+      <h3>RX hex <span class="badge" id="rx-hex-badge">0 B</span></h3>
+      <div class="hex-view" id="rx-hex"></div>
+    </div>
+
+    <!-- Demodulator trace log -->
+    <div class="section" style="flex:1">
+      <h3>Demod trace <span class="badge" id="demod-log-count">0</span></h3>
+      <div class="log-area" id="demod-log"></div>
     </div>
   </div>
+</div>
+<script type="module">
+// ╔══════════════════════════════════════════════════════════════════════════╗
+// ║  DEBUG GATE                                                             ║
+// ╚══════════════════════════════════════════════════════════════════════════╝
+let DEBUG = true;
+let TRACE = false;
 
-  <div id="recv-panel" class="panel" style="display:none">
-    <h2>Receive data</h2>
-    <label for="recv-output">Received data:</label>
-    <textarea id="recv-output" readonly placeholder="Waiting..."></textarea>
-    <div class="checkbox-row">
-      <label><input type="checkbox" id="simplex-mode-recv" checked> Force simplex (no echo/ACK)</label>
-    </div>
-    <button class="btn-recv" id="btn-recv" onclick="startReceive()">Start listening</button>
-    <button class="btn-stop" onclick="stopTransfer()" style="display:none" id="btn-stop-recv">Stop</button>
-    <div id="recv-status" class="status">
-      <div class="log-entry log-info">Ready. Click Start listening to begin.</div>
-    </div>
-  </div>
+window.toggleDebug = (on) => { DEBUG = on; document.getElementById('diag-col').style.display = on ? '' : 'none'; document.getElementById('main-layout').classList.toggle('single-col', !on); };
+window.toggleTrace = (on) => { TRACE = on; };
 
-  <script type="module">
-    // ════════════ CONSTANTS ════════════
-    const SAMPLE_RATE = 48000;
-    const SYMBOL_SAMPLES = 3840;
-    const GUARD_SAMPLES = 480;
-    const TOTAL_SYMBOL_SAMPLES = SYMBOL_SAMPLES + GUARD_SAMPLES;
-    const BASE_FREQUENCY = 1000;
-    const TONE_SPACING = 400;
-    const NUM_TONES = 20;
-    const TONES = Array.from({ length: NUM_TONES }, (_, i) => BASE_FREQUENCY + i * TONE_SPACING);
-    const BITS_PER_SYMBOL = 16;
-    const BYTES_PER_SYMBOL = 2;
-    const PREAMBLE_TONE = TONES[0];
-    const BARKER_13 = [1, 1, 1, 1, 1, -1, -1, 1, 1, -1, 1, -1, 1];
-    const TONE_AMPLITUDE = 0.2;
-    const MAX_PAYLOAD = 127;
-    const SEED_LENGTH = 64;
-    const CHALLENGE_LENGTH = 512;
-    const FRAME = { SEED:0x01, SEED_ECHO:0x02, CHALLENGE:0x03, CHALLENGE_ECHO:0x04, DATA:0x10, ACK:0x30, NAK:0x31 };
+// ╔══════════════════════════════════════════════════════════════════════════╗
+// ║  DIAGNOSTIC STATE                                                       ║
+// ╚══════════════════════════════════════════════════════════════════════════╝
+const diag = {
+  framesTx: 0, framesRx: 0, crcFail: 0, retx: 0, bytesTx: 0, bytesRx: 0,
+  threshold: 0, barkerCorr: 0, phase: 'idle',
+  logCount: 0, demodLogCount: 0,
+  // Waveform ring buffer (last ~50ms of RX audio)
+  waveformBuf: new Float32Array(2400),
+  waveformPos: 0,
+  // Spectrum: FFT result
+  spectrumBuf: new Float32Array(512),
+  // Tone energy bars (current symbol)
+  toneEnergies: new Float32Array(16),
+  // Heatmap history (32 symbols × 16 tones)
+  heatmapHistory: [],
+  heatmapMax: 32,
+  // TX/RX hex buffers
+  txHexBytes: [],
+  rxHexBytes: [],
+  // Symbol counter
+  symbolCount: 0,
+};
 
-    // ════════════ CRC-32 ════════════
-    const crcTable = new Uint32Array(256);
-    for (let i = 0; i < 256; i++) {
-      let c = i; for (let j = 0; j < 8; j++) c = (c&1) ? (0xEDB88320^(c>>>1)) : (c>>>1); crcTable[i] = c;
+function updateStat(id, val, cls) {
+  const el = document.getElementById(id);
+  if (el) { el.textContent = val; el.className = 'value' + (cls ? ' ' + cls : ''); }
+}
+function updateStats() {
+  updateStat('stat-phase', diag.phase);
+  updateStat('stat-frames-tx', diag.framesTx);
+  updateStat('stat-frames-rx', diag.framesRx);
+  updateStat('stat-crc-fail', diag.crcFail, diag.crcFail > 0 ? 'bad' : '');
+  updateStat('stat-retx', diag.retx, diag.retx > 0 ? 'warn' : '');
+  updateStat('stat-bytes-tx', diag.bytesTx);
+  updateStat('stat-bytes-rx', diag.bytesRx);
+  updateStat('stat-threshold', diag.threshold > 0 ? diag.threshold.toExponential(2) : '—');
+  updateStat('stat-barker', diag.barkerCorr || '—', diag.barkerCorr >= 9 ? 'good' : diag.barkerCorr > 0 ? 'bad' : '');
+}
+
+function setStatePill(state) {
+  const el = document.getElementById('state-pill');
+  el.textContent = state.toUpperCase();
+  el.className = 'pill ' + (state === 'idle' ? 'off' : state === 'error' ? 'warn' : 'on');
+  // Timeline dots
+  const phases = ['idle','seed','challenge','transfer','done'];
+  const idx = phases.indexOf(state);
+  phases.forEach((p, i) => {
+    const dot = document.getElementById('st-' + p);
+    if (!dot) return;
+    dot.className = 'state-dot' + (i < idx ? ' done' : i === idx ? ' active' : state === 'error' ? ' error' : '');
+  });
+}
+
+// ╔══════════════════════════════════════════════════════════════════════════╗
+// ║  LOGGING                                                                ║
+// ╚══════════════════════════════════════════════════════════════════════════╝
+function plog(msg, cls = 'info') {
+  if (cls === 'trace' && !TRACE) return;
+  if (cls === 'debug' && !DEBUG) return;
+  const el = document.getElementById('protocol-log');
+  const d = document.createElement('div');
+  d.className = 'le ' + cls;
+  const ts = new Date();
+  const tsStr = ts.toLocaleTimeString() + '.' + String(ts.getMilliseconds()).padStart(3, '0');
+  d.innerHTML = `<span class="ts">${tsStr}</span>${msg}`;
+  el.appendChild(d);
+  if (el.children.length > 500) el.removeChild(el.firstChild);
+  el.scrollTop = el.scrollHeight;
+  diag.logCount++;
+  document.getElementById('log-count-badge').textContent = diag.logCount;
+}
+function dlog(msg, cls = 'debug') {
+  if (cls === 'trace' && !TRACE) return;
+  if (!DEBUG) return;
+  const el = document.getElementById('demod-log');
+  const d = document.createElement('div');
+  d.className = 'le ' + cls;
+  const ts = new Date();
+  const tsStr = ts.toLocaleTimeString() + '.' + String(ts.getMilliseconds()).padStart(3, '0');
+  d.innerHTML = `<span class="ts">${tsStr}</span>${msg}`;
+  el.appendChild(d);
+  if (el.children.length > 500) el.removeChild(el.firstChild);
+  el.scrollTop = el.scrollHeight;
+  diag.demodLogCount++;
+  document.getElementById('demod-log-count').textContent = diag.demodLogCount;
+}
+
+// ╔══════════════════════════════════════════════════════════════════════════╗
+// ║  HEX VIEW                                                               ║
+// ╚══════════════════════════════════════════════════════════════════════════╝
+function renderHex(containerId, bytes, badgeId) {
+  if (!DEBUG) return;
+  const el = document.getElementById(containerId);
+  const lines = [];
+  for (let i = 0; i < bytes.length; i += 16) {
+    const row = bytes.slice(i, i + 16);
+    const offsetStr = i.toString(16).padStart(6, '0');
+    const hexStr = row.map(b => b.toString(16).padStart(2, '0')).join(' ');
+    const asciiStr = row.map(b => (b >= 0x20 && b < 0x7f) ? String.fromCharCode(b) : '.').join('');
+    lines.push(`<span class="offset">${offsetStr}</span>  ${hexStr.padEnd(48)}  <span class="ascii">${asciiStr}</span>`);
+  }
+  el.innerHTML = lines.join('\n');
+  el.scrollTop = el.scrollHeight;
+  if (badgeId) document.getElementById(badgeId).textContent = bytes.length + ' B';
+}
+
+// ╔══════════════════════════════════════════════════════════════════════════╗
+// ║  CANVAS VISUALIZATIONS                                                  ║
+// ╚══════════════════════════════════════════════════════════════════════════╝
+let animFrameId = null;
+
+function drawWaveform() {
+  const canvas = document.getElementById('waveform-canvas');
+  const ctx = canvas.getContext('2d');
+  const w = canvas.clientWidth, h = canvas.clientHeight;
+  canvas.width = w; canvas.height = h;
+  ctx.fillStyle = '#080808'; ctx.fillRect(0, 0, w, h);
+
+  // Grid
+  ctx.strokeStyle = '#1a1a1a'; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(0, h/2); ctx.lineTo(w, h/2); ctx.stroke();
+  ctx.strokeStyle = '#111';
+  for (let y = 0; y < h; y += h/4) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke(); }
+
+  // Waveform
+  const buf = diag.waveformBuf;
+  const len = buf.length;
+  ctx.strokeStyle = '#2563eb'; ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  for (let i = 0; i < w; i++) {
+    const sampleIdx = Math.floor((i / w) * len);
+    const idx = (diag.waveformPos + sampleIdx) % len;
+    const v = buf[idx];
+    const y = h/2 - v * h/2 * 3; // scale up for visibility
+    if (i === 0) ctx.moveTo(i, y); else ctx.lineTo(i, y);
+  }
+  ctx.stroke();
+
+  // Peak indicator
+  let peak = 0;
+  for (let i = 0; i < len; i++) peak = Math.max(peak, Math.abs(buf[i]));
+  ctx.fillStyle = peak > 0.01 ? '#2563eb' : '#333';
+  ctx.font = '10px monospace';
+  ctx.fillText('peak: ' + peak.toFixed(4), 4, 12);
+}
+
+function drawSpectrum() {
+  const canvas = document.getElementById('spectrum-canvas');
+  const ctx = canvas.getContext('2d');
+  const w = canvas.clientWidth, h = canvas.clientHeight;
+  canvas.width = w; canvas.height = h;
+  ctx.fillStyle = '#080808'; ctx.fillRect(0, 0, w, h);
+
+  const buf = diag.spectrumBuf;
+  if (!buf || buf.length === 0) return;
+
+  // Only show 0-10kHz (first ~213 bins at 48kHz with 1024-point FFT)
+  const maxBin = Math.floor(10000 / (48000 / 1024));
+  const barW = w / maxBin;
+
+  // Find max for normalization
+  let maxVal = 0;
+  for (let i = 1; i < maxBin; i++) maxVal = Math.max(maxVal, buf[i]);
+  if (maxVal < 0.001) maxVal = 0.001;
+
+  // Bars
+  for (let i = 0; i < maxBin; i++) {
+    const v = buf[i] / maxVal;
+    const barH = v * (h - 20);
+    const x = i * barW;
+
+    // Color tone slots differently
+    const freq = i * 48000 / 1024;
+    let color = '#1e293b';
+    // Check if this bin is near a protocol tone
+    for (let t = 0; t < 17; t++) {
+      const toneFreq = 1000 + t * 400;
+      if (Math.abs(freq - toneFreq) < 30) { color = t === 0 ? '#f59e0b' : '#2563eb'; break; }
     }
-    function crc32(d) { let c=0xFFFFFFFF; for(let i=0;i<d.length;i++) c=crcTable[(c^d[i])&0xFF]^(c>>>8); return (c^0xFFFFFFFF)>>>0; }
+    ctx.fillStyle = color;
+    ctx.fillRect(x, h - 16 - barH, Math.max(1, barW - 0.5), barH);
+  }
 
-    // ════════════ FRAMING ════════════
-    function encodeFrame(type, seq, payload) {
-      const f = new Uint8Array(4+payload.length+4);
-      f[0]=type; f[1]=payload.length&0xFF; f[2]=(payload.length>>8)&0xFF; f[3]=seq&0xFF;
-      f.set(payload,4);
-      const c=crc32(f.subarray(0,4+payload.length)), o=4+payload.length;
-      f[o]=c&0xFF; f[o+1]=(c>>8)&0xFF; f[o+2]=(c>>16)&0xFF; f[o+3]=(c>>24)&0xFF;
-      return f;
-    }
-    function decodeFrame(d) {
-      if(d.length<8)return null;
-      const type=d[0],length=d[1]|(d[2]<<8),seq=d[3];
-      if(length>MAX_PAYLOAD||d.length<4+length+4)return null;
-      const pe=4+length, exp=crc32(d.subarray(0,pe));
-      const act=d[pe]|(d[pe+1]<<8)|(d[pe+2]<<16)|(d[pe+3]<<24);
-      if((exp>>>0)!==(act>>>0))return null;
-      return {type,seq,payload:d.slice(4,pe)};
-    }
+  // Frequency labels
+  ctx.fillStyle = '#444'; ctx.font = '9px monospace';
+  for (let f = 1000; f <= 9000; f += 1000) {
+    const x = (f / (48000 / 1024)) / maxBin * w;
+    ctx.fillText(f/1000 + 'k', x - 6, h - 3);
+  }
 
-    // ════════════ GOERTZEL (standalone function for arbitrary buffer slices) ════════════
-    function goertzelEnergy(buf, offset, length, freq, sr) {
-      const k = (length * freq) / sr;
-      const coeff = 2 * Math.cos((2 * Math.PI * k) / length);
-      let s1 = 0, s2 = 0;
-      for (let i = 0; i < length; i++) {
-        const s0 = buf[offset + i] + coeff * s1 - s2;
-        s2 = s1; s1 = s0;
+  // Threshold line
+  if (diag.threshold > 0) {
+    const thY = h - 16 - (Math.sqrt(diag.threshold) / Math.sqrt(maxVal)) * (h - 20);
+    ctx.strokeStyle = '#dc262688'; ctx.lineWidth = 1; ctx.setLineDash([4, 4]);
+    ctx.beginPath(); ctx.moveTo(0, thY); ctx.lineTo(w, thY); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = '#dc2626'; ctx.fillText('thr', w - 20, thY - 2);
+  }
+}
+
+function drawEnergyBars() {
+  const container = document.getElementById('energy-bars-container');
+  // Lazy init bars
+  if (container.children.length === 0) {
+    for (let i = 0; i < 16; i++) {
+      const bar = document.createElement('div');
+      bar.className = 'energy-bar';
+      bar.title = `Tone ${i}: ${1400 + i * 400} Hz`;
+      container.appendChild(bar);
+    }
+  }
+  const bars = container.children;
+  let maxE = 0;
+  for (let i = 0; i < 16; i++) maxE = Math.max(maxE, diag.toneEnergies[i]);
+  if (maxE < 0.0001) maxE = 0.0001;
+  for (let i = 0; i < 16; i++) {
+    const v = diag.toneEnergies[i];
+    const pct = Math.min(100, (v / maxE) * 100);
+    bars[i].style.height = Math.max(2, pct) + '%';
+    const active = v > diag.threshold;
+    bars[i].className = 'energy-bar' + (active ? (v > maxE * 0.8 ? ' hot' : ' active') : '');
+  }
+}
+
+function drawHeatmap() {
+  const canvas = document.getElementById('heatmap-canvas');
+  const ctx = canvas.getContext('2d');
+  const w = canvas.clientWidth, h = canvas.clientHeight;
+  canvas.width = w; canvas.height = h;
+  ctx.fillStyle = '#080808'; ctx.fillRect(0, 0, w, h);
+
+  const hist = diag.heatmapHistory;
+  if (hist.length === 0) return;
+
+  const cols = hist.length;
+  const rows = 16;
+  const cellW = w / diag.heatmapMax;
+  const cellH = h / rows;
+
+  // Find global max for color scaling
+  let gmax = 0;
+  for (const row of hist) for (const v of row) gmax = Math.max(gmax, v);
+  if (gmax < 0.0001) gmax = 0.0001;
+
+  for (let c = 0; c < cols; c++) {
+    for (let r = 0; r < rows; r++) {
+      const v = hist[c][r] / gmax;
+      const active = hist[c][r] > diag.threshold;
+      if (active) {
+        const intensity = Math.min(255, Math.floor(v * 255));
+        ctx.fillStyle = `rgb(${Math.floor(intensity * 0.15)}, ${Math.floor(intensity * 0.4)}, ${intensity})`;
+      } else {
+        const g = Math.min(40, Math.floor(v * 40));
+        ctx.fillStyle = `rgb(${g}, ${g}, ${g})`;
       }
-      return s1*s1 + s2*s2 - coeff*s1*s2;
+      ctx.fillRect(c * cellW, r * cellH, cellW - 0.5, cellH - 0.5);
+    }
+  }
+
+  // Tone labels on right edge
+  ctx.fillStyle = '#333'; ctx.font = '8px monospace';
+  for (let r = 0; r < rows; r += 4) {
+    ctx.fillText((1400 + r * 400) / 1000 + 'k', w - 22, r * cellH + cellH - 2);
+  }
+}
+
+function animLoop() {
+  if (DEBUG) {
+    drawWaveform();
+    drawSpectrum();
+    drawEnergyBars();
+    drawHeatmap();
+  }
+  updateStats();
+  animFrameId = requestAnimationFrame(animLoop);
+}
+// ╔══════════════════════════════════════════════════════════════════════════╗
+// ║  PROTOCOL CORE (same as before, now with diagnostic hooks)              ║
+// ╚══════════════════════════════════════════════════════════════════════════╝
+
+const SAMPLE_RATE = 48000;
+const SYMBOL_SAMPLES = 3840;
+const GUARD_SAMPLES = 480;
+const TOTAL_SYMBOL_SAMPLES = SYMBOL_SAMPLES + GUARD_SAMPLES;
+const BASE_FREQUENCY = 1000;
+const TONE_SPACING = 400;
+const NUM_TONES = 20;
+const TONES = Array.from({ length: NUM_TONES }, (_, i) => BASE_FREQUENCY + i * TONE_SPACING);
+const BITS_PER_SYMBOL = 16;
+const BYTES_PER_SYMBOL = 2;
+const PREAMBLE_TONE = TONES[0];
+const BARKER_13 = [1, 1, 1, 1, 1, -1, -1, 1, 1, -1, 1, -1, 1];
+const TONE_AMPLITUDE = 0.2;
+const MAX_PAYLOAD = 127;
+const SEED_LENGTH = 64;
+const CHALLENGE_LENGTH = 512;
+const FRAME = { SEED:0x01, SEED_ECHO:0x02, CHALLENGE:0x03, CHALLENGE_ECHO:0x04, DATA:0x10, ACK:0x30, NAK:0x31 };
+const FRAME_NAMES = {0x01:'SEED',0x02:'SEED_ECHO',0x03:'CHALLENGE',0x04:'CHAL_ECHO',0x10:'DATA',0x30:'ACK',0x31:'NAK'};
+
+// CRC-32
+const crcTable = new Uint32Array(256);
+for (let i = 0; i < 256; i++) { let c = i; for (let j = 0; j < 8; j++) c = (c&1)?(0xEDB88320^(c>>>1)):(c>>>1); crcTable[i] = c; }
+function crc32(d) { let c=0xFFFFFFFF; for(let i=0;i<d.length;i++) c=crcTable[(c^d[i])&0xFF]^(c>>>8); return (c^0xFFFFFFFF)>>>0; }
+
+// Framing
+function encodeFrame(type, seq, payload) {
+  const f = new Uint8Array(4+payload.length+4);
+  f[0]=type; f[1]=payload.length&0xFF; f[2]=(payload.length>>8)&0xFF; f[3]=seq&0xFF;
+  f.set(payload,4);
+  const c=crc32(f.subarray(0,4+payload.length)), o=4+payload.length;
+  f[o]=c&0xFF; f[o+1]=(c>>8)&0xFF; f[o+2]=(c>>16)&0xFF; f[o+3]=(c>>24)&0xFF;
+  return f;
+}
+function decodeFrame(d) {
+  if(d.length<8)return null;
+  const type=d[0],length=d[1]|(d[2]<<8),seq=d[3];
+  if(length>MAX_PAYLOAD||d.length<4+length+4)return null;
+  const pe=4+length, exp=crc32(d.subarray(0,pe));
+  const act=d[pe]|(d[pe+1]<<8)|(d[pe+2]<<16)|(d[pe+3]<<24);
+  if((exp>>>0)!==(act>>>0))return null;
+  return {type,seq,payload:d.slice(4,pe)};
+}
+
+// Goertzel
+function goertzelEnergy(buf, offset, length, freq, sr) {
+  const k = (length * freq) / sr;
+  const coeff = 2 * Math.cos((2 * Math.PI * k) / length);
+  let s1 = 0, s2 = 0;
+  for (let i = 0; i < length; i++) {
+    const s0 = buf[offset + i] + coeff * s1 - s2;
+    s2 = s1; s1 = s0;
+  }
+  return s1*s1 + s2*s2 - coeff*s1*s2;
+}
+
+// Simple FFT for spectrum display (radix-2 DIT, in-place)
+function fftMagnitude(samples) {
+  const N = 1024;
+  const re = new Float32Array(N);
+  const im = new Float32Array(N);
+  // Copy and zero-pad
+  for (let i = 0; i < N && i < samples.length; i++) re[i] = samples[i];
+  // Bit-reversal permutation
+  for (let i = 1, j = 0; i < N; i++) {
+    let bit = N >> 1;
+    while (j & bit) { j ^= bit; bit >>= 1; }
+    j ^= bit;
+    if (i < j) { [re[i],re[j]] = [re[j],re[i]]; [im[i],im[j]] = [im[j],im[i]]; }
+  }
+  // FFT butterfly
+  for (let len = 2; len <= N; len *= 2) {
+    const ang = -2 * Math.PI / len;
+    const wRe = Math.cos(ang), wIm = Math.sin(ang);
+    for (let i = 0; i < N; i += len) {
+      let curRe = 1, curIm = 0;
+      for (let j = 0; j < len/2; j++) {
+        const tRe = curRe*re[i+j+len/2] - curIm*im[i+j+len/2];
+        const tIm = curRe*im[i+j+len/2] + curIm*re[i+j+len/2];
+        re[i+j+len/2] = re[i+j] - tRe; im[i+j+len/2] = im[i+j] - tIm;
+        re[i+j] += tRe; im[i+j] += tIm;
+        const newRe = curRe*wRe - curIm*wIm;
+        curIm = curRe*wIm + curIm*wRe; curRe = newRe;
+      }
+    }
+  }
+  const mag = new Float32Array(N/2);
+  for (let i = 0; i < N/2; i++) mag[i] = Math.sqrt(re[i]*re[i] + im[i]*im[i]) / N;
+  return mag;
+}
+
+// FSK Modulator
+function generatePreamble() {
+  const out = new Float32Array(BARKER_13.length * TOTAL_SYMBOL_SAMPLES);
+  let off = 0;
+  for (const chip of BARKER_13) {
+    if (chip === 1) for (let i = 0; i < SYMBOL_SAMPLES; i++) out[off+i] = TONE_AMPLITUDE * Math.sin(2*Math.PI*PREAMBLE_TONE*i/SAMPLE_RATE);
+    off += TOTAL_SYMBOL_SAMPLES;
+  }
+  return out;
+}
+function generateSymbol(mask) {
+  const out = new Float32Array(TOTAL_SYMBOL_SAMPLES);
+  for (let i = 0; i < SYMBOL_SAMPLES; i++) {
+    let v = 0;
+    for (let b = 0; b < BITS_PER_SYMBOL; b++) if (mask & (1<<b)) v += TONE_AMPLITUDE * Math.sin(2*Math.PI*TONES[b+1]*i/SAMPLE_RATE);
+    out[i] = v;
+  }
+  return out;
+}
+function encodeToAudio(frameBytes) {
+  const pre = generatePreamble();
+  const nSym = Math.ceil(frameBytes.length / BYTES_PER_SYMBOL);
+  const out = new Float32Array(pre.length + nSym * TOTAL_SYMBOL_SAMPLES);
+  out.set(pre, 0); let off = pre.length;
+  for (let s = 0; s < nSym; s++) {
+    const bi = s * BYTES_PER_SYMBOL; let mask = 0;
+    for (let b = 0; b < BYTES_PER_SYMBOL; b++) if (bi+b < frameBytes.length) mask |= frameBytes[bi+b] << (b*8);
+    out.set(generateSymbol(mask), off); off += TOTAL_SYMBOL_SAMPLES;
+  }
+  return out;
+}
+
+// PRNG
+class Xoshiro256ss {
+  constructor(seed) { const v=new DataView(seed.buffer,seed.byteOffset,32); this.s=[v.getBigUint64(0,true),v.getBigUint64(8,true),v.getBigUint64(16,true),v.getBigUint64(24,true)]; if(this.s.every(x=>x===0n))this.s[0]=1n; }
+  static M=(1n<<64n)-1n;
+  static rotl(x,k){return((x<<k)|(x>>(64n-k)))&Xoshiro256ss.M;}
+  next(){ const M=Xoshiro256ss.M,r=(Xoshiro256ss.rotl((this.s[1]*5n)&M,7n)*9n)&M,t=(this.s[1]<<17n)&M; this.s[2]^=this.s[0];this.s[3]^=this.s[1];this.s[1]^=this.s[2];this.s[0]^=this.s[3];this.s[2]^=t;this.s[3]=Xoshiro256ss.rotl(this.s[3],45n);return r; }
+  nextBytes(n){ const o=new Uint8Array(n);let p=0;while(p<n){const v=this.next();for(let i=0;i<8&&p<n;i++)o[p++]=Number((v>>BigInt(i*8))&0xFFn);}return o; }
+}
+async function deriveTestBlock(seed,turn){ const inp=new Uint8Array(seed.length+4);inp.set(seed);new DataView(inp.buffer).setUint32(seed.length,turn,true);const h=new Uint8Array(await crypto.subtle.digest('SHA-256',inp));return new Xoshiro256ss(h).nextBytes(CHALLENGE_LENGTH); }
+
+// ╔══════════════════════════════════════════════════════════════════════════╗
+// ║  DEMODULATOR with diagnostic hooks                                      ║
+// ╚══════════════════════════════════════════════════════════════════════════╝
+class FSKDemodulator {
+  constructor() {
+    this.buf = new Float32Array(0);
+    this.bufLen = 0;
+    this.state = 'scanning';
+    this.symbolStart = 0;
+    this.chipEnergies = [];
+    this.firstChipPos = 0;
+    this.threshold = 0.005;
+    this.symbolBuffer = [];
+    this.expectedBytes = 0;
+    this.decodedFrames = [];
+    this.scanPos = 0;
+    this.scanStep = Math.floor(TOTAL_SYMBOL_SAMPLES / 2);
+    this.fftBuf = new Float32Array(1024); // for spectrum display
+  }
+
+  _grow(samples) {
+    if (this.bufLen + samples.length > this.buf.length) {
+      const ns = Math.max(this.buf.length * 2, this.bufLen + samples.length + 48000);
+      const nb = new Float32Array(ns);
+      nb.set(this.buf.subarray(0, this.bufLen));
+      this.buf = nb;
+    }
+    this.buf.set(samples, this.bufLen);
+    this.bufLen += samples.length;
+
+    // Diagnostic: waveform + FFT
+    if (DEBUG) {
+      for (let i = 0; i < samples.length; i++) {
+        diag.waveformBuf[diag.waveformPos % diag.waveformBuf.length] = samples[i];
+        diag.waveformPos++;
+      }
+      // FFT on last 1024 samples
+      if (this.bufLen >= 1024) {
+        const start = this.bufLen - 1024;
+        for (let i = 0; i < 1024; i++) this.fftBuf[i] = this.buf[start + i];
+        diag.spectrumBuf = fftMagnitude(this.fftBuf);
+      }
+    }
+  }
+
+  _compact() {
+    const safe = Math.min(this.scanPos, this.symbolStart) - TOTAL_SYMBOL_SAMPLES * 2;
+    if (safe > 50000) {
+      this.buf.copyWithin(0, safe, this.bufLen);
+      this.bufLen -= safe;
+      this.scanPos -= safe;
+      this.symbolStart -= safe;
+      this.firstChipPos -= safe;
+    }
+  }
+
+  feedSamples(samples) {
+    this._grow(samples);
+    if (this.state === 'scanning') this._scan();
+    else if (this.state === 'preamble') this._trackPreamble();
+    else if (this.state === 'data') this._decodeData();
+    this._compact();
+    const frames = this.decodedFrames;
+    this.decodedFrames = [];
+    return frames;
+  }
+
+  _scan() {
+    while (this.scanPos + SYMBOL_SAMPLES <= this.bufLen) {
+      const energy = goertzelEnergy(this.buf, this.scanPos, SYMBOL_SAMPLES, PREAMBLE_TONE, SAMPLE_RATE);
+      if (TRACE) dlog(`scan pos=${this.scanPos} preambleE=${energy.toExponential(2)}`, 'trace');
+      if (energy > 0.001) {
+        dlog(`⚡ Preamble tone detected! E=${energy.toFixed(4)} pos=${this.scanPos}`, 'info');
+        this.state = 'preamble';
+        this.chipEnergies = [energy];
+        this.firstChipPos = this.scanPos;
+        this.scanPos = this.firstChipPos + TOTAL_SYMBOL_SAMPLES;
+        this._trackPreamble();
+        return;
+      }
+      this.scanPos += this.scanStep;
+    }
+  }
+
+  _trackPreamble() {
+    while (this.chipEnergies.length < BARKER_13.length) {
+      const nextPos = this.firstChipPos + this.chipEnergies.length * TOTAL_SYMBOL_SAMPLES;
+      if (nextPos + SYMBOL_SAMPLES > this.bufLen) return;
+      const energy = goertzelEnergy(this.buf, nextPos, SYMBOL_SAMPLES, PREAMBLE_TONE, SAMPLE_RATE);
+      this.chipEnergies.push(energy);
+      if (TRACE) dlog(`chip[${this.chipEnergies.length-1}] E=${energy.toExponential(2)} (expected: ${BARKER_13[this.chipEnergies.length-1] === 1 ? 'ON' : 'OFF'})`, 'trace');
     }
 
-    // ════════════ FSK MODULATOR ════════════
-    function generatePreamble() {
-      const out = new Float32Array(BARKER_13.length * TOTAL_SYMBOL_SAMPLES);
-      let off = 0;
-      for (const chip of BARKER_13) {
-        if (chip === 1) {
-          for (let i = 0; i < SYMBOL_SAMPLES; i++)
-            out[off+i] = TONE_AMPLITUDE * Math.sin(2*Math.PI*PREAMBLE_TONE*i/SAMPLE_RATE);
+    // Validate
+    const sorted = [...this.chipEnergies].sort((a,b) => a-b);
+    const mid = (sorted[3] + sorted[4]) / 2;
+    const detected = this.chipEnergies.map(e => e > mid ? 1 : -1);
+    let corr = 0;
+    for (let i = 0; i < BARKER_13.length; i++) corr += detected[i] * BARKER_13[i];
+    diag.barkerCorr = corr;
+
+    dlog(`Barker: corr=${corr}/13 detected=[${detected.join(',')}]`, corr >= 9 ? 'success' : 'warn');
+    dlog(`Chip energies: [${this.chipEnergies.map(e => e.toExponential(1)).join(', ')}]`, 'debug');
+
+    if (corr >= 9) {
+      // Calibrate
+      const onE = [], offE = [];
+      for (let i = 0; i < BARKER_13.length; i++) { (BARKER_13[i]===1?onE:offE).push(this.chipEnergies[i]); }
+      const onAvg = onE.reduce((a,b)=>a+b,0)/onE.length;
+      const offAvg = offE.length ? offE.reduce((a,b)=>a+b,0)/offE.length : 1e-10;
+      this.threshold = Math.sqrt(onAvg * Math.max(offAvg, 1e-10)) * 0.3;
+      diag.threshold = this.threshold;
+
+      dlog(`✓ Calibrated: onAvg=${onAvg.toExponential(2)} offAvg=${offAvg.toExponential(2)} threshold=${this.threshold.toExponential(2)}`, 'success');
+      plog(`Preamble lock (corr=${corr}, thr=${this.threshold.toExponential(2)})`, 'success');
+
+      this.symbolStart = this.firstChipPos + BARKER_13.length * TOTAL_SYMBOL_SAMPLES;
+      this.state = 'data';
+      this.symbolBuffer = [];
+      this.expectedBytes = 0;
+      diag.symbolCount = 0;
+      this._decodeData();
+    } else {
+      dlog(`✗ Barker failed, resuming scan`, 'warn');
+      this.scanPos = this.firstChipPos + this.scanStep;
+      this.state = 'scanning';
+      this.chipEnergies = [];
+      this._scan();
+    }
+  }
+
+  _decodeData() {
+    while (this.symbolStart + TOTAL_SYMBOL_SAMPLES <= this.bufLen) {
+      let mask = 0;
+      const energies = new Float32Array(16);
+      for (let bit = 0; bit < BITS_PER_SYMBOL; bit++) {
+        const e = goertzelEnergy(this.buf, this.symbolStart, SYMBOL_SAMPLES, TONES[bit+1], SAMPLE_RATE);
+        energies[bit] = e;
+        if (e > this.threshold) mask |= (1 << bit);
+      }
+
+      // Diagnostics
+      if (DEBUG) {
+        diag.toneEnergies.set(energies);
+        diag.heatmapHistory.push(Array.from(energies));
+        if (diag.heatmapHistory.length > diag.heatmapMax) diag.heatmapHistory.shift();
+        diag.symbolCount++;
+        document.getElementById('tone-symbol-badge').textContent = `sym #${diag.symbolCount}`;
+      }
+
+      const byte0 = mask & 0xFF;
+      const byte1 = (mask >> 8) & 0xFF;
+      this.symbolBuffer.push(byte0, byte1);
+
+      if (TRACE) {
+        const bits = mask.toString(2).padStart(16, '0');
+        const eStr = Array.from(energies).map(e => e > this.threshold ? '█' : '░').join('');
+        dlog(`sym#${diag.symbolCount} mask=0x${mask.toString(16).padStart(4,'0')} bits=${bits} [${eStr}] → 0x${byte0.toString(16).padStart(2,'0')} 0x${byte1.toString(16).padStart(2,'0')}`, 'trace');
+      }
+
+      this.symbolStart += TOTAL_SYMBOL_SAMPLES;
+
+      if (this.symbolBuffer.length >= 4 && this.expectedBytes === 0) {
+        const payloadLen = this.symbolBuffer[1] | (this.symbolBuffer[2] << 8);
+        this.expectedBytes = 4 + payloadLen + 4;
+        const typeName = FRAME_NAMES[this.symbolBuffer[0]] || '0x'+this.symbolBuffer[0].toString(16);
+        dlog(`Header: type=${typeName} len=${payloadLen} seq=${this.symbolBuffer[3]} → ${this.expectedBytes}B total`, 'info');
+      }
+
+      if (this.expectedBytes > 0 && this.symbolBuffer.length >= this.expectedBytes) {
+        const raw = new Uint8Array(this.symbolBuffer.slice(0, this.expectedBytes));
+        this.decodedFrames.push(raw);
+        const typeName = FRAME_NAMES[raw[0]] || '0x'+raw[0].toString(16);
+        dlog(`Frame complete: ${typeName} ${this.expectedBytes}B`, 'success');
+
+        if (DEBUG) {
+          // Add to RX hex
+          diag.rxHexBytes.push(...raw);
+          renderHex('rx-hex', diag.rxHexBytes, 'rx-hex-badge');
         }
-        off += TOTAL_SYMBOL_SAMPLES;
-      }
-      return out;
-    }
-    function generateSymbol(mask) {
-      const out = new Float32Array(TOTAL_SYMBOL_SAMPLES);
-      for (let i = 0; i < SYMBOL_SAMPLES; i++) {
-        let v = 0;
-        for (let b = 0; b < BITS_PER_SYMBOL; b++)
-          if (mask & (1<<b)) v += TONE_AMPLITUDE * Math.sin(2*Math.PI*TONES[b+1]*i/SAMPLE_RATE);
-        out[i] = v;
-      }
-      return out;
-    }
-    function encodeToAudio(frameBytes) {
-      const pre = generatePreamble();
-      const nSym = Math.ceil(frameBytes.length / BYTES_PER_SYMBOL);
-      const out = new Float32Array(pre.length + nSym * TOTAL_SYMBOL_SAMPLES);
-      out.set(pre, 0);
-      let off = pre.length;
-      for (let s = 0; s < nSym; s++) {
-        const bi = s * BYTES_PER_SYMBOL;
-        let mask = 0;
-        for (let b = 0; b < BYTES_PER_SYMBOL; b++)
-          if (bi+b < frameBytes.length) mask |= frameBytes[bi+b] << (b*8);
-        out.set(generateSymbol(mask), off);
-        off += TOTAL_SYMBOL_SAMPLES;
-      }
-      return out;
-    }
 
-    // ════════════ FSK DEMODULATOR (rewritten with sliding preamble detection) ════════════
-    //
-    // BUG FIX: The old demodulator processed samples in fixed-size chunks from
-    // whenever it started listening. Since that start time has no relation to the
-    // sender's symbol boundaries, every Goertzel window straddled two symbols
-    // and produced garbage.
-    //
-    // NEW APPROACH:
-    // 1. Accumulate all raw samples in a continuous buffer.
-    // 2. During SCANNING, slide a Goertzel window across the buffer in half-symbol
-    //    steps looking for preamble-tone energy.
-    // 3. When energy is found, switch to PREAMBLE tracking: measure energy at
-    //    exactly TOTAL_SYMBOL_SAMPLES intervals (chip boundaries).
-    // 4. After 13 chips, correlate with Barker-13 to validate.
-    // 5. On validation, compute the exact sample position where data begins
-    //    and lock all subsequent symbol processing to that alignment.
-
-    class FSKDemodulator {
-      constructor(logFn) {
-        this.log = logFn || (() => {});
-        this.buf = new Float32Array(0);
-        this.bufLen = 0;
         this.state = 'scanning';
-        this.symbolStart = 0;
-        this.chipEnergies = [];
-        this.firstChipPos = 0;
-        this.threshold = 0.005;
         this.symbolBuffer = [];
         this.expectedBytes = 0;
-        this.decodedFrames = [];
-        this.scanPos = 0;
-        this.scanStep = Math.floor(TOTAL_SYMBOL_SAMPLES / 2);
-      }
-
-      _growBuf(newSamples) {
-        // Append new samples to the continuous buffer
-        if (this.bufLen + newSamples.length > this.buf.length) {
-          // Grow buffer (double or fit)
-          const newSize = Math.max(this.buf.length * 2, this.bufLen + newSamples.length + 48000);
-          const nb = new Float32Array(newSize);
-          nb.set(this.buf.subarray(0, this.bufLen));
-          this.buf = nb;
-        }
-        this.buf.set(newSamples, this.bufLen);
-        this.bufLen += newSamples.length;
-      }
-
-      _compact() {
-        // Discard processed samples to prevent unbounded growth
-        const safe = Math.min(this.scanPos, this.symbolStart) - TOTAL_SYMBOL_SAMPLES * 2;
-        if (safe > 50000) {
-          // Shift buffer contents left
-          this.buf.copyWithin(0, safe, this.bufLen);
-          this.bufLen -= safe;
-          this.scanPos -= safe;
-          this.symbolStart -= safe;
-          this.firstChipPos -= safe;
-        }
-      }
-
-      feedSamples(samples) {
-        this._growBuf(samples);
-
-        if (this.state === 'scanning') this._scan();
-        else if (this.state === 'preamble') this._trackPreamble();
-        else if (this.state === 'data') this._decodeData();
-
-        this._compact();
-
-        const frames = this.decodedFrames;
-        this.decodedFrames = [];
-        return frames;
-      }
-
-      _scan() {
-        while (this.scanPos + SYMBOL_SAMPLES <= this.bufLen) {
-          const energy = goertzelEnergy(this.buf, this.scanPos, SYMBOL_SAMPLES, PREAMBLE_TONE, SAMPLE_RATE);
-
-          if (energy > 0.001) {
-            this.log(`Preamble tone detected, energy=${energy.toFixed(4)}`, 'info');
-            this.state = 'preamble';
-            this.chipEnergies = [energy];
-            this.firstChipPos = this.scanPos;
-            this.scanPos = this.firstChipPos + TOTAL_SYMBOL_SAMPLES;
-            this._trackPreamble();
-            return;
-          }
-          this.scanPos += this.scanStep;
-        }
-      }
-
-      _trackPreamble() {
-        while (this.chipEnergies.length < BARKER_13.length) {
-          const nextPos = this.firstChipPos + this.chipEnergies.length * TOTAL_SYMBOL_SAMPLES;
-          if (nextPos + SYMBOL_SAMPLES > this.bufLen) return; // need more samples
-
-          const energy = goertzelEnergy(this.buf, nextPos, SYMBOL_SAMPLES, PREAMBLE_TONE, SAMPLE_RATE);
-          this.chipEnergies.push(energy);
-        }
-
-        // Validate Barker-13 correlation
-        const sorted = [...this.chipEnergies].sort((a,b) => a-b);
-        const mid = (sorted[3] + sorted[4]) / 2;
-        const detected = this.chipEnergies.map(e => e > mid ? 1 : -1);
-        let corr = 0;
-        for (let i = 0; i < BARKER_13.length; i++) corr += detected[i] * BARKER_13[i];
-
-        this.log(`Barker corr=${corr}/13`, 'info');
-
-        if (corr >= 9) {
-          // Calibrate threshold from ON/OFF energy
-          const onE = [], offE = [];
-          for (let i = 0; i < BARKER_13.length; i++) {
-            if (BARKER_13[i] === 1) onE.push(this.chipEnergies[i]);
-            else offE.push(this.chipEnergies[i]);
-          }
-          const onAvg = onE.reduce((a,b)=>a+b,0)/onE.length;
-          const offAvg = offE.length ? offE.reduce((a,b)=>a+b,0)/offE.length : 1e-10;
-          // Data tones share amplitude across up to 16 simultaneous tones, so
-          // per-tone energy is much lower. Scale threshold down significantly.
-          this.threshold = Math.sqrt(onAvg * Math.max(offAvg, 1e-10)) * 0.3;
-          this.log(`Threshold=${this.threshold.toFixed(6)} (on=${onAvg.toFixed(4)} off=${offAvg.toFixed(6)})`, 'info');
-
-          // Data starts after the full preamble
-          this.symbolStart = this.firstChipPos + BARKER_13.length * TOTAL_SYMBOL_SAMPLES;
-          this.state = 'data';
-          this.symbolBuffer = [];
-          this.expectedBytes = 0;
-          this.log(`Preamble OK! Data starts at sample ${this.symbolStart}`, 'success');
-          this._decodeData();
-        } else {
-          // Failed — resume scanning
-          this.scanPos = this.firstChipPos + this.scanStep;
-          this.state = 'scanning';
-          this.chipEnergies = [];
-          this._scan();
-        }
-      }
-
-      _decodeData() {
-        while (this.symbolStart + TOTAL_SYMBOL_SAMPLES <= this.bufLen) {
-          let mask = 0;
-          for (let bit = 0; bit < BITS_PER_SYMBOL; bit++) {
-            const energy = goertzelEnergy(this.buf, this.symbolStart, SYMBOL_SAMPLES, TONES[bit+1], SAMPLE_RATE);
-            if (energy > this.threshold) mask |= (1 << bit);
-          }
-
-          for (let b = 0; b < BYTES_PER_SYMBOL; b++)
-            this.symbolBuffer.push((mask >> (b*8)) & 0xFF);
-
-          this.symbolStart += TOTAL_SYMBOL_SAMPLES;
-
-          // After header (4 bytes), compute expected frame length
-          if (this.symbolBuffer.length >= 4 && this.expectedBytes === 0) {
-            const payloadLen = this.symbolBuffer[1] | (this.symbolBuffer[2] << 8);
-            this.expectedBytes = 4 + payloadLen + 4;
-            this.log(`Header: type=0x${this.symbolBuffer[0].toString(16)} len=${payloadLen} → expect ${this.expectedBytes}B`, 'info');
-          }
-
-          if (this.expectedBytes > 0 && this.symbolBuffer.length >= this.expectedBytes) {
-            const raw = new Uint8Array(this.symbolBuffer.slice(0, this.expectedBytes));
-            this.decodedFrames.push(raw);
-            this.log(`Frame complete (${this.expectedBytes}B)`, 'success');
-
-            // Back to scanning for next preamble
-            this.state = 'scanning';
-            this.symbolBuffer = [];
-            this.expectedBytes = 0;
-            this.chipEnergies = [];
-            this.scanPos = this.symbolStart;
-            return;
-          }
-        }
-      }
-
-      reset() {
-        this.buf = new Float32Array(0);
-        this.bufLen = 0;
-        this.state = 'scanning';
-        this.symbolStart = 0;
         this.chipEnergies = [];
-        this.firstChipPos = 0;
-        this.symbolBuffer = [];
-        this.expectedBytes = 0;
-        this.decodedFrames = [];
-        this.scanPos = 0;
+        this.scanPos = this.symbolStart;
+        return;
       }
     }
+  }
 
-    // ════════════ PRNG ════════════
-    class Xoshiro256ss {
-      constructor(seed) {
-        const v = new DataView(seed.buffer, seed.byteOffset, 32);
-        this.s = [v.getBigUint64(0,true),v.getBigUint64(8,true),v.getBigUint64(16,true),v.getBigUint64(24,true)];
-        if (this.s.every(x=>x===0n)) this.s[0]=1n;
-      }
-      static M=(1n<<64n)-1n;
-      static rotl(x,k){return((x<<k)|(x>>(64n-k)))&Xoshiro256ss.M;}
-      next(){
-        const M=Xoshiro256ss.M;
-        const r=(Xoshiro256ss.rotl((this.s[1]*5n)&M,7n)*9n)&M;
-        const t=(this.s[1]<<17n)&M;
-        this.s[2]^=this.s[0];this.s[3]^=this.s[1];this.s[1]^=this.s[2];this.s[0]^=this.s[3];
-        this.s[2]^=t;this.s[3]=Xoshiro256ss.rotl(this.s[3],45n);
-        return r;
-      }
-      nextBytes(n){
-        const out=new Uint8Array(n);let off=0;
-        while(off<n){const v=this.next();for(let i=0;i<8&&off<n;i++)out[off++]=Number((v>>BigInt(i*8))&0xFFn);}
-        return out;
-      }
-    }
-    async function deriveTestBlock(seed,turn){
-      const inp=new Uint8Array(seed.length+4);inp.set(seed);
-      new DataView(inp.buffer).setUint32(seed.length,turn,true);
-      const h=new Uint8Array(await crypto.subtle.digest('SHA-256',inp));
-      return new Xoshiro256ss(h).nextBytes(CHALLENGE_LENGTH);
-    }
+  reset() {
+    this.buf = new Float32Array(0); this.bufLen = 0; this.state = 'scanning';
+    this.symbolStart = 0; this.chipEnergies = []; this.firstChipPos = 0;
+    this.symbolBuffer = []; this.expectedBytes = 0; this.decodedFrames = [];
+    this.scanPos = 0;
+  }
+}
 
-    // ════════════ AUDIO WORKLET ════════════
-    // Sends raw 128-sample render quanta to main thread (no pre-chunking)
-    const WORKLET_CODE = `
+// ╔══════════════════════════════════════════════════════════════════════════╗
+// ║  AUDIO WORKLET + INIT                                                   ║
+// ╚══════════════════════════════════════════════════════════════════════════╝
+const WORKLET_CODE = `
 class SonicLinkProcessor extends AudioWorkletProcessor {
   constructor() {
     super();
@@ -446,219 +864,311 @@ class SonicLinkProcessor extends AudioWorkletProcessor {
 }
 registerProcessor('soniclink-processor',SonicLinkProcessor);`;
 
-    // ════════════ DEMO APP ════════════
-    let currentMode='send', audioCtx=null, workletNode=null, mediaStream=null,
-        sourceNode=null, demodulator=null, isRunning=false, frameWaiters=[];
+let audioCtx=null, workletNode=null, mediaStream=null, sourceNode=null, demodulator=null, isRunning=false, frameWaiters=[];
 
-    function log(target,msg,cls='info'){
-      const el=document.getElementById(target);
-      const d=document.createElement('div');
-      d.className=`log-entry log-${cls}`;
-      d.textContent=`[${new Date().toLocaleTimeString()}] ${msg}`;
-      el.appendChild(d); el.scrollTop=el.scrollHeight;
-    }
-
-    window.setMode=function(mode){
-      currentMode=mode;
-      document.getElementById('mode-send').classList.toggle('active',mode==='send');
-      document.getElementById('mode-recv').classList.toggle('active',mode==='recv');
-      document.getElementById('send-panel').style.display=mode==='send'?'block':'none';
-      document.getElementById('recv-panel').style.display=mode==='recv'?'block':'none';
-    };
-
-    async function initAudio(needMic){
-      audioCtx=new AudioContext({sampleRate:SAMPLE_RATE});
-      const blob=new Blob([WORKLET_CODE],{type:'application/javascript'});
-      const url=URL.createObjectURL(blob);
-      await audioCtx.audioWorklet.addModule(url);
-      URL.revokeObjectURL(url);
-      workletNode=new AudioWorkletNode(audioCtx,'soniclink-processor',{numberOfInputs:1,numberOfOutputs:1,channelCount:1});
-      workletNode.connect(audioCtx.destination);
-      workletNode.port.onmessage=(event)=>{
-        const msg=event.data;
-        if(msg.event==='rx-samples'&&demodulator){
-          const frames=demodulator.feedSamples(new Float32Array(msg.samples));
-          for(const raw of frames){
-            const dec=decodeFrame(raw);
-            if(!dec){
-              const s=currentMode==='send'?'send-status':'recv-status';
-              log(s,`CRC fail (${raw.length}B, hdr: ${Array.from(raw.slice(0,4)).map(b=>b.toString(16).padStart(2,'0')).join(' ')})`,'error');
-              continue;
-            }
-            const idx=frameWaiters.findIndex(w=>w.expectedType===dec.type);
-            if(idx!==-1){const w=frameWaiters.splice(idx,1)[0];clearTimeout(w.timer);w.resolve(dec);}
-          }
+async function initAudio(needMic) {
+  audioCtx = new AudioContext({ sampleRate: SAMPLE_RATE });
+  plog(`AudioContext created: sampleRate=${audioCtx.sampleRate}`, 'debug');
+  const blob = new Blob([WORKLET_CODE], { type: 'application/javascript' });
+  const url = URL.createObjectURL(blob);
+  await audioCtx.audioWorklet.addModule(url);
+  URL.revokeObjectURL(url);
+  workletNode = new AudioWorkletNode(audioCtx, 'soniclink-processor', { numberOfInputs:1, numberOfOutputs:1, channelCount:1 });
+  workletNode.connect(audioCtx.destination);
+  workletNode.port.onmessage = (event) => {
+    const msg = event.data;
+    if (msg.event === 'rx-samples' && demodulator) {
+      const samples = new Float32Array(msg.samples);
+      const frames = demodulator.feedSamples(samples);
+      for (const raw of frames) {
+        const dec = decodeFrame(raw);
+        if (!dec) {
+          diag.crcFail++;
+          const hdr = Array.from(raw.slice(0,6)).map(b=>b.toString(16).padStart(2,'0')).join(' ');
+          plog(`CRC FAIL (${raw.length}B) hdr=[${hdr}]`, 'error');
+          dlog(`CRC detail: raw[${raw.length}B] expected_crc=${crc32(raw.subarray(0,4+(raw[1]|(raw[2]<<8)))).toString(16)} got=${((raw[raw.length-4])|(raw[raw.length-3]<<8)|(raw[raw.length-2]<<16)|(raw[raw.length-1]<<24)>>>0).toString(16)}`, 'error');
+          continue;
         }
-      };
-      if(needMic){
-        mediaStream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:false,noiseSuppression:false,autoGainControl:false}});
-        sourceNode=audioCtx.createMediaStreamSource(mediaStream);
-        sourceNode.connect(workletNode);
+        diag.framesRx++;
+        const name = FRAME_NAMES[dec.type] || '0x'+dec.type.toString(16);
+        plog(`RX frame: ${name} seq=${dec.seq} payload=${dec.payload.length}B`, 'progress');
+        const idx = frameWaiters.findIndex(w => w.expectedType === dec.type);
+        if (idx !== -1) { const w = frameWaiters.splice(idx,1)[0]; clearTimeout(w.timer); w.resolve(dec); }
       }
     }
+  };
+  if (needMic) {
+    plog('Requesting mic...', 'debug');
+    mediaStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation:false, noiseSuppression:false, autoGainControl:false } });
+    sourceNode = audioCtx.createMediaStreamSource(mediaStream);
+    sourceNode.connect(workletNode);
+    plog(`Mic connected: ${mediaStream.getAudioTracks()[0].label}`, 'debug');
+  }
+}
 
-    function txPlay(frameBytes){
-      return new Promise(resolve=>{
-        const audio=encodeToAudio(frameBytes);
-        const h=(e)=>{if(e.data.event==='tx-complete'){workletNode.port.removeEventListener('message',h);resolve();}};
-        workletNode.port.addEventListener('message',h);
-        workletNode.port.postMessage({cmd:'tx-enqueue',samples:Array.from(audio)});
-      });
+function txPlay(frameBytes) {
+  return new Promise(resolve => {
+    const audio = encodeToAudio(frameBytes);
+    plog(`TX audio: ${audio.length} samples (${(audio.length/SAMPLE_RATE*1000).toFixed(0)}ms)`, 'debug');
+    // Diagnostic: add to TX hex
+    if (DEBUG) {
+      diag.txHexBytes.push(...frameBytes);
+      renderHex('tx-hex', diag.txHexBytes, 'tx-hex-badge');
+    }
+    diag.framesTx++;
+    const h = (e) => { if(e.data.event==='tx-complete'){workletNode.port.removeEventListener('message',h);resolve();} };
+    workletNode.port.addEventListener('message', h);
+    workletNode.port.postMessage({ cmd:'tx-enqueue', samples:Array.from(audio) });
+  });
+}
+
+function rxPause() { if(workletNode) workletNode.port.postMessage({cmd:'rx-stop'}); }
+function rxResume() { if(workletNode) workletNode.port.postMessage({cmd:'rx-start'}); }
+
+async function txPlayHalfDuplex(frameBytes) {
+  rxPause();
+  await txPlay(frameBytes);
+  await new Promise(r => setTimeout(r, 100));
+  rxResume();
+}
+
+function waitForFrame(type, ms) {
+  const name = FRAME_NAMES[type] || '0x'+type.toString(16);
+  if (TRACE) plog(`Waiting for ${name} (timeout ${ms}ms)`, 'trace');
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      const i = frameWaiters.findIndex(w => w.timer === timer);
+      if (i !== -1) frameWaiters.splice(i, 1);
+      plog(`Timeout waiting for ${name}`, 'warn');
+      reject(new Error(`Timeout waiting for ${name}`));
+    }, ms);
+    frameWaiters.push({ expectedType:type, resolve, reject, timer });
+  });
+}
+
+async function cleanup() {
+  if(workletNode){workletNode.port.postMessage({cmd:'reset'});workletNode.disconnect();workletNode=null;}
+  if(sourceNode){sourceNode.disconnect();sourceNode=null;}
+  if(mediaStream){mediaStream.getTracks().forEach(t=>t.stop());mediaStream=null;}
+  if(audioCtx){await audioCtx.close();audioCtx=null;}
+  if(demodulator)demodulator.reset();
+  frameWaiters.forEach(w=>clearTimeout(w.timer));
+  frameWaiters=[];isRunning=false;
+}
+
+function setPhase(phase) {
+  diag.phase = phase;
+  setStatePill(phase);
+  plog(`→ ${phase.toUpperCase()}`, 'state');
+}
+
+// ╔══════════════════════════════════════════════════════════════════════════╗
+// ║  SENDER                                                                 ║
+// ╚══════════════════════════════════════════════════════════════════════════╝
+window.startSend = async function() {
+  if (isRunning) return; isRunning = true;
+  resetDiag();
+  const simplex = document.getElementById('simplex-mode').checked;
+  document.getElementById('btn-send').disabled = true;
+  document.getElementById('btn-recv').disabled = true;
+  document.getElementById('btn-stop').style.display = 'inline';
+  document.getElementById('recv-section').style.display = 'none';
+
+  try {
+    const text = document.getElementById('send-input').value;
+    const data = new TextEncoder().encode(text);
+    plog(`Sending ${data.length} bytes: "${text.length > 50 ? text.slice(0,50)+'...' : text}"`, 'info');
+    plog(`Mode: ${simplex ? 'simplex (no echo)' : 'half-duplex'}`, 'info');
+
+    demodulator = new FSKDemodulator();
+    await initAudio(!simplex);
+    if (!simplex) rxResume();
+
+    // Seed
+    setPhase('seed');
+    const seed = new Uint8Array(SEED_LENGTH); crypto.getRandomValues(seed);
+    plog(`Seed generated: ${Array.from(seed.slice(0,8)).map(b=>b.toString(16).padStart(2,'0')).join(' ')}...`, 'debug');
+    const seedF = encodeFrame(FRAME.SEED, 0, seed);
+    if (simplex) await txPlay(seedF); else await txPlayHalfDuplex(seedF);
+    plog(`Seed sent (${SEED_LENGTH}B, frame=${seedF.length}B)`, 'progress');
+    diag.bytesTx += seedF.length;
+
+    if (!simplex) {
+      try { await waitForFrame(FRAME.SEED_ECHO, 15000); plog('Seed echo ✓', 'success'); }
+      catch(e) { plog('Seed echo timeout (continuing)', 'warn'); diag.retx++; }
     }
 
-    function rxPause(){if(workletNode)workletNode.port.postMessage({cmd:'rx-stop'});}
-    function rxResume(){if(workletNode)workletNode.port.postMessage({cmd:'rx-start'});}
+    // Challenge
+    setPhase('challenge');
+    const tb = await deriveTestBlock(seed, 0);
+    plog(`Challenge block derived (${CHALLENGE_LENGTH}B)`, 'debug');
+    let challengeFrameCount = 0;
+    for (let o = 0; o < tb.length; o += MAX_PAYLOAD) {
+      const ch = tb.slice(o, Math.min(o+MAX_PAYLOAD, tb.length));
+      const f = encodeFrame(FRAME.CHALLENGE, challengeFrameCount, ch);
+      if (simplex) await txPlay(f); else await txPlayHalfDuplex(f);
+      diag.bytesTx += f.length;
+      challengeFrameCount++;
+    }
+    plog(`Challenge sent (${CHALLENGE_LENGTH}B in ${challengeFrameCount} frames)`, 'progress');
 
-    async function txPlayHalfDuplex(frameBytes){
-      rxPause();
-      await txPlay(frameBytes);
-      await new Promise(r=>setTimeout(r,100));
-      rxResume();
+    if (!simplex) {
+      try { await waitForFrame(FRAME.CHALLENGE_ECHO, 15000); plog('Challenge echo ✓', 'success'); }
+      catch(e) { plog('Challenge echo timeout (continuing)', 'warn'); diag.retx++; }
     }
 
-    function waitForFrame(type,ms){
-      return new Promise((resolve,reject)=>{
-        const timer=setTimeout(()=>{
-          const i=frameWaiters.findIndex(w=>w.timer===timer);
-          if(i!==-1)frameWaiters.splice(i,1);
-          reject(new Error('Timeout'));
-        },ms);
-        frameWaiters.push({expectedType:type,resolve,reject,timer});
-      });
+    // Data
+    setPhase('transfer');
+    let bytesSent = 0, seq = 0;
+    const totalFrames = Math.ceil(data.length / MAX_PAYLOAD);
+    plog(`Data: ${data.length}B → ${totalFrames} frame(s)`, 'info');
+    for (let o = 0; o < data.length; o += MAX_PAYLOAD) {
+      const ch = data.slice(o, Math.min(o+MAX_PAYLOAD, data.length));
+      const f = encodeFrame(FRAME.DATA, seq & 0xFF, ch);
+      if (simplex) { for (let r = 0; r < 3; r++) { await txPlay(f); if (TRACE) plog(`DATA[${seq}] repeat ${r+1}/3`, 'trace'); } }
+      else { await txPlayHalfDuplex(f); try { await waitForFrame(FRAME.ACK,15000); } catch(e){ plog(`ACK timeout frame ${seq}`,'warn'); diag.retx++; } }
+      bytesSent += ch.length; diag.bytesTx += f.length * (simplex ? 3 : 1); seq++;
+      plog(`DATA[${seq-1}] ${ch.length}B → ${bytesSent}/${data.length}`, 'progress');
     }
 
-    async function cleanup(){
-      if(workletNode){workletNode.port.postMessage({cmd:'reset'});workletNode.disconnect();workletNode=null;}
-      if(sourceNode){sourceNode.disconnect();sourceNode=null;}
-      if(mediaStream){mediaStream.getTracks().forEach(t=>t.stop());mediaStream=null;}
-      if(audioCtx){await audioCtx.close();audioCtx=null;}
-      if(demodulator)demodulator.reset();
-      frameWaiters.forEach(w=>clearTimeout(w.timer));
-      frameWaiters=[];isRunning=false;
+    setPhase('done');
+    plog(`✓ Complete! ${data.length} bytes sent.`, 'success');
+  } catch(e) {
+    setPhase('error');
+    plog(`ERROR: ${e.message}`, 'error');
+    console.error(e);
+  } finally {
+    await cleanup();
+    document.getElementById('btn-send').disabled = false;
+    document.getElementById('btn-recv').disabled = false;
+    document.getElementById('btn-stop').style.display = 'none';
+  }
+};
+
+// ╔══════════════════════════════════════════════════════════════════════════╗
+// ║  RECEIVER                                                               ║
+// ╚══════════════════════════════════════════════════════════════════════════╝
+window.startReceive = async function() {
+  if (isRunning) return; isRunning = true;
+  resetDiag();
+  const simplex = document.getElementById('simplex-mode').checked;
+  document.getElementById('btn-send').disabled = true;
+  document.getElementById('btn-recv').disabled = true;
+  document.getElementById('btn-stop').style.display = 'inline';
+  document.getElementById('recv-section').style.display = 'block';
+  document.getElementById('recv-output').value = '';
+
+  try {
+    demodulator = new FSKDemodulator();
+    await initAudio(true);
+    rxResume();
+    setPhase('idle');
+    plog(`Listening... (${simplex ? 'simplex' : 'half-duplex'})`, 'info');
+
+    // Seed
+    setPhase('seed');
+    const sf = await waitForFrame(FRAME.SEED, 120000);
+    const seed = sf.payload;
+    plog(`Seed received (${seed.length}B): ${Array.from(seed.slice(0,8)).map(b=>b.toString(16).padStart(2,'0')).join(' ')}...`, 'success');
+    diag.bytesRx += seed.length;
+    if (!simplex) { await txPlayHalfDuplex(encodeFrame(FRAME.SEED_ECHO,0,seed)); plog('Seed echo sent','progress'); }
+
+    // Challenge
+    setPhase('challenge');
+    const chunks=[]; let total=0;
+    while (total < CHALLENGE_LENGTH) {
+      const f = await waitForFrame(FRAME.CHALLENGE, 60000);
+      chunks.push(f.payload); total += f.payload.length;
+      plog(`Challenge chunk: ${f.payload.length}B (${total}/${CHALLENGE_LENGTH})`, 'progress');
+    }
+    const recv = new Uint8Array(total); let ro = 0;
+    for (const c of chunks) { recv.set(c, ro); ro += c.length; }
+    const exp = await deriveTestBlock(seed, 0);
+    let ok = true, firstDiff = -1;
+    for (let i = 0; i < CHALLENGE_LENGTH; i++) if (recv[i] !== exp[i]) { ok = false; firstDiff = i; break; }
+    if (ok) plog('Challenge verified ✓', 'success');
+    else plog(`Challenge MISMATCH at byte ${firstDiff}: got 0x${recv[firstDiff].toString(16)} expected 0x${exp[firstDiff].toString(16)}`, 'error');
+    diag.bytesRx += total;
+    if (!simplex) { await txPlayHalfDuplex(encodeFrame(FRAME.CHALLENGE_ECHO,0,new Uint8Array([1]))); plog('Challenge echo sent','progress'); }
+
+    // Data
+    setPhase('transfer');
+    const dataCh=[]; const seen=new Set(); let rx=0;
+    while (true) {
+      try {
+        const f = await waitForFrame(FRAME.DATA, 20000);
+        if (!seen.has(f.seq)) {
+          seen.add(f.seq); dataCh.push(f.payload); rx += f.payload.length;
+          diag.bytesRx += f.payload.length;
+          plog(`DATA[${f.seq}] ${f.payload.length}B (total: ${rx})`, 'progress');
+          document.getElementById('recv-bytes-badge').textContent = rx + ' B';
+          if (!simplex) await txPlayHalfDuplex(encodeFrame(FRAME.ACK, f.seq, new Uint8Array(0)));
+        } else { plog(`Dup DATA[${f.seq}] (ignored)`, 'debug'); }
+      } catch(e) { plog('Data timeout → transfer complete', 'info'); break; }
     }
 
-    window.stopTransfer=async function(){
-      await cleanup();
-      document.getElementById('btn-send').disabled=false;
-      document.getElementById('btn-recv').disabled=false;
-      document.getElementById('btn-stop-send').style.display='none';
-      document.getElementById('btn-stop-recv').style.display='none';
-    };
+    const result = new Uint8Array(rx); let wo = 0;
+    for (const c of dataCh) { result.set(c, wo); wo += c.length; }
+    const text = new TextDecoder().decode(result);
+    document.getElementById('recv-output').value = text;
 
-    // ── SENDER ──
-    window.startSend=async function(){
-      if(isRunning)return; isRunning=true;
-      const S='send-status'; document.getElementById(S).innerHTML='';
-      const simplex=document.getElementById('simplex-mode').checked;
-      document.getElementById('btn-send').disabled=true;
-      document.getElementById('btn-stop-send').style.display='inline';
-      try{
-        const text=document.getElementById('send-input').value;
-        const data=new TextEncoder().encode(text);
-        log(S,`Sending ${data.length} bytes`,'info');
-        demodulator=new FSKDemodulator((m,c)=>log(S,`[demod] ${m}`,c));
-        await initAudio(!simplex);
-        if(!simplex)rxResume();
+    setPhase('done');
+    plog(`✓ Complete! ${rx} bytes: "${text.length > 80 ? text.slice(0,80)+'...' : text}"`, 'success');
+  } catch(e) {
+    setPhase('error');
+    plog(`ERROR: ${e.message}`, 'error');
+    console.error(e);
+  } finally {
+    await cleanup();
+    document.getElementById('btn-send').disabled = false;
+    document.getElementById('btn-recv').disabled = false;
+    document.getElementById('btn-stop').style.display = 'none';
+  }
+};
 
-        // Phase 1: Seed
-        log(S,'Phase 1: Sending seed...','state');
-        const seed=new Uint8Array(SEED_LENGTH); crypto.getRandomValues(seed);
-        const seedF=encodeFrame(FRAME.SEED,0,seed);
-        if(simplex)await txPlay(seedF); else await txPlayHalfDuplex(seedF);
-        log(S,`Seed sent (${SEED_LENGTH}B)`,'progress');
-        if(!simplex){
-          try{log(S,'Waiting for echo...','info');
-            await waitForFrame(FRAME.SEED_ECHO,15000);log(S,'Echo received!','success');
-          }catch(e){log(S,'Echo timeout (continuing)','error');}
-        }
+// ╔══════════════════════════════════════════════════════════════════════════╗
+// ║  GLOBAL CONTROLS                                                        ║
+// ╚══════════════════════════════════════════════════════════════════════════╝
+window.stopTransfer = async function() {
+  plog('STOP requested', 'warn');
+  await cleanup();
+  setPhase('idle');
+  document.getElementById('btn-send').disabled = false;
+  document.getElementById('btn-recv').disabled = false;
+  document.getElementById('btn-stop').style.display = 'none';
+};
 
-        // Phase 2: Challenge
-        log(S,'Phase 2: Sending challenge...','state');
-        const tb=await deriveTestBlock(seed,0);
-        for(let o=0;o<tb.length;o+=MAX_PAYLOAD){
-          const ch=tb.slice(o,Math.min(o+MAX_PAYLOAD,tb.length));
-          const f=encodeFrame(FRAME.CHALLENGE,Math.floor(o/MAX_PAYLOAD),ch);
-          if(simplex)await txPlay(f); else await txPlayHalfDuplex(f);
-        }
-        log(S,`Challenge sent (${CHALLENGE_LENGTH}B)`,'progress');
-        if(!simplex){
-          try{await waitForFrame(FRAME.CHALLENGE_ECHO,15000);log(S,'Challenge echo!','success');
-          }catch(e){log(S,'Challenge echo timeout','error');}
-        }
+function resetDiag() {
+  diag.framesTx=0; diag.framesRx=0; diag.crcFail=0; diag.retx=0;
+  diag.bytesTx=0; diag.bytesRx=0; diag.threshold=0; diag.barkerCorr=0;
+  diag.logCount=0; diag.demodLogCount=0; diag.symbolCount=0;
+  diag.waveformBuf.fill(0); diag.waveformPos=0;
+  diag.spectrumBuf.fill(0); diag.toneEnergies.fill(0);
+  diag.heatmapHistory=[]; diag.txHexBytes=[]; diag.rxHexBytes=[];
+  document.getElementById('protocol-log').innerHTML='';
+  document.getElementById('demod-log').innerHTML='';
+  document.getElementById('tx-hex').innerHTML='';
+  document.getElementById('rx-hex').innerHTML='';
+  document.getElementById('log-count-badge').textContent='0';
+  document.getElementById('demod-log-count').textContent='0';
+  document.getElementById('tx-hex-badge').textContent='0 B';
+  document.getElementById('rx-hex-badge').textContent='0 B';
+  document.getElementById('recv-bytes-badge').textContent='0 B';
+  document.getElementById('tone-symbol-badge').textContent='waiting';
+}
 
-        // Phase 3: Data
-        log(S,'Phase 3: Sending data...','state');
-        let sent=0,seq=0;
-        for(let o=0;o<data.length;o+=MAX_PAYLOAD){
-          const ch=data.slice(o,Math.min(o+MAX_PAYLOAD,data.length));
-          const f=encodeFrame(FRAME.DATA,seq&0xFF,ch);
-          if(simplex){for(let r=0;r<3;r++)await txPlay(f);}
-          else{await txPlayHalfDuplex(f);
-            try{await waitForFrame(FRAME.ACK,15000);}catch(e){log(S,`ACK timeout frame ${seq}`,'error');}
-          }
-          sent+=ch.length; seq++;
-          log(S,`Sent ${sent}/${data.length}`,'progress');
-        }
-        log(S,`Done! ${data.length} bytes sent.`,'success');
-      }catch(e){log(S,`Error: ${e.message}`,'error');}
-      finally{await cleanup();document.getElementById('btn-send').disabled=false;document.getElementById('btn-stop-send').style.display='none';}
-    };
+// Init energy bars
+const ebCont = document.getElementById('energy-bars-container');
+for (let i = 0; i < 16; i++) {
+  const bar = document.createElement('div');
+  bar.className = 'energy-bar';
+  bar.title = `T${i}: ${1400 + i * 400} Hz`;
+  ebCont.appendChild(bar);
+}
 
-    // ── RECEIVER ──
-    window.startReceive=async function(){
-      if(isRunning)return; isRunning=true;
-      const S='recv-status'; document.getElementById(S).innerHTML='';
-      const simplex=document.getElementById('simplex-mode-recv').checked;
-      document.getElementById('btn-recv').disabled=true;
-      document.getElementById('btn-stop-recv').style.display='inline';
-      try{
-        demodulator=new FSKDemodulator((m,c)=>log(S,`[demod] ${m}`,c));
-        await initAudio(true); rxResume();
-        log(S,'Listening for sender...','state');
-
-        // Phase 1: Seed
-        log(S,'Waiting for seed...','info');
-        const sf=await waitForFrame(FRAME.SEED,120000);
-        const seed=sf.payload;
-        log(S,`Seed received (${seed.length}B)`,'success');
-        if(!simplex){await txPlayHalfDuplex(encodeFrame(FRAME.SEED_ECHO,0,seed));log(S,'Echo sent','progress');}
-
-        // Phase 2: Challenge
-        log(S,'Waiting for challenge...','info');
-        const chunks=[]; let total=0;
-        while(total<CHALLENGE_LENGTH){
-          const f=await waitForFrame(FRAME.CHALLENGE,60000);
-          chunks.push(f.payload); total+=f.payload.length;
-          log(S,`Challenge chunk ${f.payload.length}B (${total}/${CHALLENGE_LENGTH})`,'progress');
-        }
-        const recv=new Uint8Array(total); let ro=0;
-        for(const c of chunks){recv.set(c,ro);ro+=c.length;}
-        const exp=await deriveTestBlock(seed,0);
-        let ok=true; for(let i=0;i<CHALLENGE_LENGTH;i++)if(recv[i]!==exp[i]){ok=false;break;}
-        log(S,ok?'Challenge verified!':'Challenge MISMATCH',ok?'success':'error');
-        if(!simplex){await txPlayHalfDuplex(encodeFrame(FRAME.CHALLENGE_ECHO,0,new Uint8Array([1])));log(S,'Challenge echo sent','progress');}
-
-        // Phase 3: Data
-        log(S,'Receiving data...','state');
-        const dataCh=[]; const seen=new Set(); let rx=0;
-        while(true){
-          try{
-            const f=await waitForFrame(FRAME.DATA,20000);
-            if(!seen.has(f.seq)){
-              seen.add(f.seq); dataCh.push(f.payload); rx+=f.payload.length;
-              log(S,`Frame ${f.seq}: ${f.payload.length}B (total: ${rx})`,'progress');
-              if(!simplex)await txPlayHalfDuplex(encodeFrame(FRAME.ACK,f.seq,new Uint8Array(0)));
-            }else{log(S,`Dup frame ${f.seq}`,'info');}
-          }catch(e){log(S,'Timeout — transfer complete','info');break;}
-        }
-        const result=new Uint8Array(rx);let wo=0;
-        for(const c of dataCh){result.set(c,wo);wo+=c.length;}
-        const text=new TextDecoder().decode(result);
-        document.getElementById('recv-output').value=text;
-        log(S,`Done! ${rx} bytes: "${text}"`,'success');
-      }catch(e){log(S,`Error: ${e.message}`,'error');}
-      finally{await cleanup();document.getElementById('btn-recv').disabled=false;document.getElementById('btn-stop-recv').style.display='none';}
-    };
-  </script>
+// Start animation loop
+animLoop();
+plog('Dashboard ready', 'info');
+</script>
 </body>
 </html>
