@@ -148,6 +148,7 @@ canvas{width:100%;background:#080808;border-radius:4px;display:block}
         <div class="stat"><span class="label">Bytes RX</span><span class="value" id="stat-bytes-rx">0</span></div>
         <div class="stat"><span class="label">Threshold</span><span class="value" id="stat-threshold">—</span></div>
         <div class="stat"><span class="label">Barker Corr</span><span class="value" id="stat-barker">—</span></div>
+        <div class="stat"><span class="label">Noise Floor</span><span class="value" id="stat-noise">—</span></div>
       </div>
     </div>
 
@@ -221,7 +222,7 @@ window.toggleTrace = (on) => { TRACE = on; };
 // ╚══════════════════════════════════════════════════════════════════════════╝
 const diag = {
   framesTx: 0, framesRx: 0, crcFail: 0, retx: 0, bytesTx: 0, bytesRx: 0,
-  threshold: 0, barkerCorr: 0, phase: 'idle',
+  threshold: 0, barkerCorr: 0, phase: 'idle', noiseFloor: 0,
   logCount: 0, demodLogCount: 0,
   // Waveform ring buffer (last ~50ms of RX audio)
   waveformBuf: new Float32Array(2400),
@@ -253,7 +254,8 @@ function updateStats() {
   updateStat('stat-bytes-tx', diag.bytesTx);
   updateStat('stat-bytes-rx', diag.bytesRx);
   updateStat('stat-threshold', diag.threshold > 0 ? diag.threshold.toExponential(2) : '—');
-  updateStat('stat-barker', diag.barkerCorr || '—', diag.barkerCorr >= 9 ? 'good' : diag.barkerCorr > 0 ? 'bad' : '');
+  updateStat('stat-barker', diag.barkerCorr || '—', diag.barkerCorr >= 11 ? 'good' : diag.barkerCorr > 0 ? 'bad' : '');
+  updateStat('stat-noise', diag.noiseFloor > 0 ? diag.noiseFloor.toExponential(2) : '—');
 }
 
 function setStatePill(state) {
@@ -630,8 +632,40 @@ class Xoshiro256ss {
 async function deriveTestBlock(seed,turn){ const inp=new Uint8Array(seed.length+4);inp.set(seed);new DataView(inp.buffer).setUint32(seed.length,turn,true);const h=new Uint8Array(await crypto.subtle.digest('SHA-256',inp));return new Xoshiro256ss(h).nextBytes(CHALLENGE_LENGTH); }
 
 // ╔══════════════════════════════════════════════════════════════════════════╗
-// ║  DEMODULATOR with diagnostic hooks                                      ║
+// ║  DEMODULATOR with noise-floor-aware multi-gate detection                ║
 // ╚══════════════════════════════════════════════════════════════════════════╝
+//
+// Detection gates (ALL must pass to accept a preamble):
+//
+//  Gate 1 — ABSOLUTE FLOOR: First chip energy > 0.5
+//           Real signals at normal volume produce energies of 10–65+.
+//           Anything below 0.5 is definitely not a speaker tone.
+//
+//  Gate 2 — NOISE RATIO: First chip energy > noiseFloor * 100
+//           The noise floor is continuously tracked as an exponential
+//           moving average of all scan-window energies. A real tone must
+//           be at least 100× above the noise floor.
+//
+//  Gate 3 — BARKER CORRELATION >= 11 (was 9)
+//           With 13 chips, random noise correlates to ≤5 on average.
+//           Requiring 11 means at most 1 chip error. This is stricter
+//           but the preamble is loud and clear — 1 chip tolerance is fine.
+//
+//  Gate 4 — ON/OFF RATIO >= 8
+//           After Barker validation, we know which chips should be ON
+//           vs OFF. The average ON energy must be at least 8× the average
+//           OFF energy. Real signals have 15–50× ratios. Noise has <3×.
+//
+//  Gate 5 — ON FLOOR: Average ON chip energy > noiseFloor * 30
+//           Even if the ratio looks okay, the absolute ON level must be
+//           meaningfully above noise.
+
+const DETECT_ABSOLUTE_FLOOR = 0.5;  // Gate 1: minimum energy to even consider
+const DETECT_NOISE_RATIO = 100;     // Gate 2: multiplier above noise floor
+const DETECT_BARKER_MIN = 11;       // Gate 3: minimum Barker correlation
+const DETECT_ONOFF_RATIO = 8;       // Gate 4: minimum ON/OFF energy ratio
+const DETECT_ON_NOISE_RATIO = 30;   // Gate 5: ON avg must be this × noise floor
+
 class FSKDemodulator {
   constructor() {
     this.buf = new Float32Array(0);
@@ -646,7 +680,13 @@ class FSKDemodulator {
     this.decodedFrames = [];
     this.scanPos = 0;
     this.scanStep = Math.floor(TOTAL_SYMBOL_SAMPLES / 2);
-    this.fftBuf = new Float32Array(1024); // for spectrum display
+    this.fftBuf = new Float32Array(1024);
+
+    // Noise floor tracking
+    this.noiseFloor = 0.001; // conservative initial estimate
+    this.noiseAlpha = 0.005; // EMA smoothing factor (slow adaptation)
+    this.noiseSamples = 0;   // how many measurements we've taken
+    this.scansSinceDetect = 0; // consecutive low-energy scans
   }
 
   _grow(samples) {
@@ -659,13 +699,11 @@ class FSKDemodulator {
     this.buf.set(samples, this.bufLen);
     this.bufLen += samples.length;
 
-    // Diagnostic: waveform + FFT
     if (DEBUG) {
       for (let i = 0; i < samples.length; i++) {
         diag.waveformBuf[diag.waveformPos % diag.waveformBuf.length] = samples[i];
         diag.waveformPos++;
       }
-      // FFT on last 1024 samples
       if (this.bufLen >= 1024) {
         const start = this.bufLen - 1024;
         for (let i = 0; i < 1024; i++) this.fftBuf[i] = this.buf[start + i];
@@ -685,6 +723,24 @@ class FSKDemodulator {
     }
   }
 
+  _updateNoiseFloor(energy) {
+    // Only update noise floor from low-energy windows (below detection threshold)
+    // This prevents real signals from inflating the noise floor
+    const detThreshold = Math.max(DETECT_ABSOLUTE_FLOOR, this.noiseFloor * DETECT_NOISE_RATIO * 0.5);
+    if (energy < detThreshold) {
+      this.noiseSamples++;
+      if (this.noiseSamples < 20) {
+        // Bootstrap: simple average for first 20 samples
+        this.noiseFloor = this.noiseFloor + (energy - this.noiseFloor) / this.noiseSamples;
+      } else {
+        // EMA after bootstrap
+        this.noiseFloor = this.noiseAlpha * energy + (1 - this.noiseAlpha) * this.noiseFloor;
+      }
+      // Floor the noise floor to prevent it from going to zero
+      this.noiseFloor = Math.max(this.noiseFloor, 1e-8);
+    }
+  }
+
   feedSamples(samples) {
     this._grow(samples);
     if (this.state === 'scanning') this._scan();
@@ -699,17 +755,44 @@ class FSKDemodulator {
   _scan() {
     while (this.scanPos + SYMBOL_SAMPLES <= this.bufLen) {
       const energy = goertzelEnergy(this.buf, this.scanPos, SYMBOL_SAMPLES, PREAMBLE_TONE, SAMPLE_RATE);
-      if (TRACE) dlog(`scan pos=${this.scanPos} preambleE=${energy.toExponential(2)}`, 'trace');
-      if (energy > 0.001) {
-        dlog(`⚡ Preamble tone detected! E=${energy.toFixed(4)} pos=${this.scanPos}`, 'info');
-        this.state = 'preamble';
-        this.chipEnergies = [energy];
-        this.firstChipPos = this.scanPos;
-        this.scanPos = this.firstChipPos + TOTAL_SYMBOL_SAMPLES;
-        this._trackPreamble();
-        return;
+
+      // Update noise floor from every measurement
+      this._updateNoiseFloor(energy);
+
+      // Update diag noise floor for display
+      if (DEBUG && this.noiseSamples % 20 === 0) {
+        diag.noiseFloor = this.noiseFloor;
       }
-      this.scanPos += this.scanStep;
+
+      if (TRACE && this.scansSinceDetect % 50 === 0) {
+        dlog(`scan: E=${energy.toExponential(2)} noise=${this.noiseFloor.toExponential(2)} gate1=${DETECT_ABSOLUTE_FLOOR} gate2=${(this.noiseFloor * DETECT_NOISE_RATIO).toExponential(2)}`, 'trace');
+      }
+
+      // ── Gate 1: Absolute energy floor ──
+      if (energy < DETECT_ABSOLUTE_FLOOR) {
+        this.scanPos += this.scanStep;
+        this.scansSinceDetect++;
+        continue;
+      }
+
+      // ── Gate 2: Energy significantly above noise floor ──
+      const noiseGate = this.noiseFloor * DETECT_NOISE_RATIO;
+      if (energy < noiseGate) {
+        if (DEBUG) dlog(`Gate 2 reject: E=${energy.toExponential(2)} < noiseGate=${noiseGate.toExponential(2)}`, 'debug');
+        this.scanPos += this.scanStep;
+        this.scansSinceDetect++;
+        continue;
+      }
+
+      // Passed gates 1+2 — start preamble tracking
+      dlog(`⚡ Candidate preamble: E=${energy.toFixed(2)} (noise=${this.noiseFloor.toExponential(2)}, ratio=${(energy/this.noiseFloor).toFixed(0)}×)`, 'info');
+      this.state = 'preamble';
+      this.chipEnergies = [energy];
+      this.firstChipPos = this.scanPos;
+      this.scanPos = this.firstChipPos + TOTAL_SYMBOL_SAMPLES;
+      this.scansSinceDetect = 0;
+      this._trackPreamble();
+      return;
     }
   }
 
@@ -719,10 +802,13 @@ class FSKDemodulator {
       if (nextPos + SYMBOL_SAMPLES > this.bufLen) return;
       const energy = goertzelEnergy(this.buf, nextPos, SYMBOL_SAMPLES, PREAMBLE_TONE, SAMPLE_RATE);
       this.chipEnergies.push(energy);
-      if (TRACE) dlog(`chip[${this.chipEnergies.length-1}] E=${energy.toExponential(2)} (expected: ${BARKER_13[this.chipEnergies.length-1] === 1 ? 'ON' : 'OFF'})`, 'trace');
+      if (TRACE) {
+        const expected = BARKER_13[this.chipEnergies.length-1] === 1 ? 'ON' : 'OFF';
+        dlog(`chip[${this.chipEnergies.length-1}] E=${energy.toExponential(2)} (${expected})`, 'trace');
+      }
     }
 
-    // Validate
+    // ── Gate 3: Barker correlation ──
     const sorted = [...this.chipEnergies].sort((a,b) => a-b);
     const mid = (sorted[3] + sorted[4]) / 2;
     const detected = this.chipEnergies.map(e => e > mid ? 1 : -1);
@@ -730,34 +816,63 @@ class FSKDemodulator {
     for (let i = 0; i < BARKER_13.length; i++) corr += detected[i] * BARKER_13[i];
     diag.barkerCorr = corr;
 
-    dlog(`Barker: corr=${corr}/13 detected=[${detected.join(',')}]`, corr >= 9 ? 'success' : 'warn');
-    dlog(`Chip energies: [${this.chipEnergies.map(e => e.toExponential(1)).join(', ')}]`, 'debug');
-
-    if (corr >= 9) {
-      // Calibrate
-      const onE = [], offE = [];
-      for (let i = 0; i < BARKER_13.length; i++) { (BARKER_13[i]===1?onE:offE).push(this.chipEnergies[i]); }
-      const onAvg = onE.reduce((a,b)=>a+b,0)/onE.length;
-      const offAvg = offE.length ? offE.reduce((a,b)=>a+b,0)/offE.length : 1e-10;
-      this.threshold = Math.sqrt(onAvg * Math.max(offAvg, 1e-10)) * 0.3;
-      diag.threshold = this.threshold;
-
-      dlog(`✓ Calibrated: onAvg=${onAvg.toExponential(2)} offAvg=${offAvg.toExponential(2)} threshold=${this.threshold.toExponential(2)}`, 'success');
-      plog(`Preamble lock (corr=${corr}, thr=${this.threshold.toExponential(2)})`, 'success');
-
-      this.symbolStart = this.firstChipPos + BARKER_13.length * TOTAL_SYMBOL_SAMPLES;
-      this.state = 'data';
-      this.symbolBuffer = [];
-      this.expectedBytes = 0;
-      diag.symbolCount = 0;
-      this._decodeData();
-    } else {
-      dlog(`✗ Barker failed, resuming scan`, 'warn');
-      this.scanPos = this.firstChipPos + this.scanStep;
-      this.state = 'scanning';
-      this.chipEnergies = [];
-      this._scan();
+    if (corr < DETECT_BARKER_MIN) {
+      dlog(`Gate 3 reject: Barker corr=${corr}/13 < ${DETECT_BARKER_MIN} — detected=[${detected.join(',')}]`, 'warn');
+      dlog(`Chip energies: [${this.chipEnergies.map(e => e.toExponential(1)).join(', ')}]`, 'debug');
+      this._rejectAndRescan();
+      return;
     }
+
+    // ── Gate 4: ON/OFF energy ratio ──
+    const onE = [], offE = [];
+    for (let i = 0; i < BARKER_13.length; i++) {
+      (BARKER_13[i] === 1 ? onE : offE).push(this.chipEnergies[i]);
+    }
+    const onAvg = onE.reduce((a,b) => a+b, 0) / onE.length;
+    const offAvg = offE.length > 0 ? offE.reduce((a,b) => a+b, 0) / offE.length : 1e-10;
+    const onOffRatio = onAvg / Math.max(offAvg, 1e-10);
+
+    if (onOffRatio < DETECT_ONOFF_RATIO) {
+      dlog(`Gate 4 reject: ON/OFF ratio=${onOffRatio.toFixed(1)} < ${DETECT_ONOFF_RATIO} (on=${onAvg.toExponential(2)} off=${offAvg.toExponential(2)})`, 'warn');
+      this._rejectAndRescan();
+      return;
+    }
+
+    // ── Gate 5: ON average above noise ──
+    const onNoiseRatio = onAvg / Math.max(this.noiseFloor, 1e-10);
+    if (onNoiseRatio < DETECT_ON_NOISE_RATIO) {
+      dlog(`Gate 5 reject: ON/noise ratio=${onNoiseRatio.toFixed(1)} < ${DETECT_ON_NOISE_RATIO} (on=${onAvg.toExponential(2)} noise=${this.noiseFloor.toExponential(2)})`, 'warn');
+      this._rejectAndRescan();
+      return;
+    }
+
+    // ═══ ALL GATES PASSED ═══
+    // Calibrate data detection threshold
+    // Data tones share amplitude across up to 16 simultaneous tones.
+    // Per-tone energy ≈ onAvg / 16² = onAvg/256 in the worst case (all tones on).
+    // Use geometric mean of ON/OFF scaled down, with a safety factor.
+    this.threshold = Math.sqrt(onAvg * Math.max(offAvg, 1e-10)) * 0.3;
+    diag.threshold = this.threshold;
+
+    dlog(`✓ PREAMBLE ACCEPTED`, 'success');
+    dlog(`  Barker corr=${corr}/13, ON/OFF=${onOffRatio.toFixed(1)}×, ON/noise=${onNoiseRatio.toFixed(0)}×`, 'success');
+    dlog(`  onAvg=${onAvg.toExponential(2)} offAvg=${offAvg.toExponential(2)} threshold=${this.threshold.toExponential(2)}`, 'debug');
+    dlog(`  Chips: [${this.chipEnergies.map(e => e.toExponential(1)).join(', ')}]`, 'debug');
+    plog(`Preamble lock (corr=${corr}, on/off=${onOffRatio.toFixed(0)}×, thr=${this.threshold.toExponential(2)})`, 'success');
+
+    this.symbolStart = this.firstChipPos + BARKER_13.length * TOTAL_SYMBOL_SAMPLES;
+    this.state = 'data';
+    this.symbolBuffer = [];
+    this.expectedBytes = 0;
+    diag.symbolCount = 0;
+    this._decodeData();
+  }
+
+  _rejectAndRescan() {
+    this.scanPos = this.firstChipPos + this.scanStep;
+    this.state = 'scanning';
+    this.chipEnergies = [];
+    this._scan();
   }
 
   _decodeData() {
@@ -770,7 +885,6 @@ class FSKDemodulator {
         if (e > this.threshold) mask |= (1 << bit);
       }
 
-      // Diagnostics
       if (DEBUG) {
         diag.toneEnergies.set(energies);
         diag.heatmapHistory.push(Array.from(energies));
@@ -796,6 +910,18 @@ class FSKDemodulator {
         this.expectedBytes = 4 + payloadLen + 4;
         const typeName = FRAME_NAMES[this.symbolBuffer[0]] || '0x'+this.symbolBuffer[0].toString(16);
         dlog(`Header: type=${typeName} len=${payloadLen} seq=${this.symbolBuffer[3]} → ${this.expectedBytes}B total`, 'info');
+
+        // Sanity check: if payload length is unreasonable, this is probably
+        // a misaligned decode. Reject and go back to scanning.
+        if (payloadLen > MAX_PAYLOAD) {
+          dlog(`Header REJECT: payload len ${payloadLen} > MAX_PAYLOAD ${MAX_PAYLOAD} — likely misaligned`, 'error');
+          this.state = 'scanning';
+          this.symbolBuffer = [];
+          this.expectedBytes = 0;
+          this.chipEnergies = [];
+          this.scanPos = this.symbolStart;
+          return;
+        }
       }
 
       if (this.expectedBytes > 0 && this.symbolBuffer.length >= this.expectedBytes) {
@@ -805,7 +931,6 @@ class FSKDemodulator {
         dlog(`Frame complete: ${typeName} ${this.expectedBytes}B`, 'success');
 
         if (DEBUG) {
-          // Add to RX hex
           diag.rxHexBytes.push(...raw);
           renderHex('rx-hex', diag.rxHexBytes, 'rx-hex-badge');
         }
@@ -824,7 +949,8 @@ class FSKDemodulator {
     this.buf = new Float32Array(0); this.bufLen = 0; this.state = 'scanning';
     this.symbolStart = 0; this.chipEnergies = []; this.firstChipPos = 0;
     this.symbolBuffer = []; this.expectedBytes = 0; this.decodedFrames = [];
-    this.scanPos = 0;
+    this.scanPos = 0; this.noiseFloor = 0.001; this.noiseSamples = 0;
+    this.scansSinceDetect = 0;
   }
 }
 
@@ -1141,7 +1267,7 @@ window.stopTransfer = async function() {
 function resetDiag() {
   diag.framesTx=0; diag.framesRx=0; diag.crcFail=0; diag.retx=0;
   diag.bytesTx=0; diag.bytesRx=0; diag.threshold=0; diag.barkerCorr=0;
-  diag.logCount=0; diag.demodLogCount=0; diag.symbolCount=0;
+  diag.logCount=0; diag.demodLogCount=0; diag.symbolCount=0; diag.noiseFloor=0;
   diag.waveformBuf.fill(0); diag.waveformPos=0;
   diag.spectrumBuf.fill(0); diag.toneEnergies.fill(0);
   diag.heatmapHistory=[]; diag.txHexBytes=[]; diag.rxHexBytes=[];
