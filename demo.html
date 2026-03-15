@@ -189,6 +189,7 @@ canvas{width:100%;background:#080808;border-radius:4px;display:block}
         <div class="stat"><span class="label">Threshold</span><span class="value" id="stat-threshold">—</span></div>
         <div class="stat"><span class="label">Barker Corr</span><span class="value" id="stat-barker">—</span></div>
         <div class="stat"><span class="label">Noise Floor</span><span class="value" id="stat-noise">—</span></div>
+        <div class="stat"><span class="label">Tone Cal</span><span class="value" id="stat-tonecal">—</span></div>
       </div>
     </div>
 
@@ -295,6 +296,8 @@ const diag = {
   rxHexBytes: [],
   // Symbol counter
   symbolCount: 0,
+  // Per-tone calibration results
+  perToneCal: null, // { energy: [], threshold: [], usable: [] }
 };
 
 function updateStat(id, val, cls) {
@@ -312,6 +315,12 @@ function updateStats() {
   updateStat('stat-threshold', diag.threshold > 0 ? diag.threshold.toExponential(2) : '—');
   updateStat('stat-barker', diag.barkerCorr || '—', diag.barkerCorr >= 11 ? 'good' : diag.barkerCorr > 0 ? 'bad' : '');
   updateStat('stat-noise', diag.noiseFloor > 0 ? diag.noiseFloor.toExponential(2) : '—');
+  const calInfo = diag.perToneCal
+    ? `${diag.perToneCal.usable.filter(u=>u).length}/${BITS_PER_SYMBOL}`
+    : '—';
+  updateStat('stat-tonecal', calInfo, diag.perToneCal
+    ? (diag.perToneCal.usable.filter(u=>u).length >= 12 ? 'good' : diag.perToneCal.usable.filter(u=>u).length >= 8 ? 'warn' : 'bad')
+    : '');
 }
 
 function setStatePill(state) {
@@ -477,16 +486,8 @@ function drawSpectrum() {
 
 function drawEnergyBars() {
   const container = document.getElementById('energy-bars-container');
-  // Lazy init bars
-  if (container.children.length === 0) {
-    for (let i = 0; i < 16; i++) {
-      const bar = document.createElement('div');
-      bar.className = 'energy-bar';
-      bar.title = `Tone ${i}: ${1400 + i * 400} Hz`;
-      container.appendChild(bar);
-    }
-  }
   const bars = container.children;
+  if (bars.length === 0) return;
   let maxE = 0;
   for (let i = 0; i < 16; i++) maxE = Math.max(maxE, diag.toneEnergies[i]);
   if (maxE < 0.0001) maxE = 0.0001;
@@ -494,8 +495,18 @@ function drawEnergyBars() {
     const v = diag.toneEnergies[i];
     const pct = Math.min(100, (v / maxE) * 100);
     bars[i].style.height = Math.max(2, pct) + '%';
-    const active = v > diag.threshold;
-    bars[i].className = 'energy-bar' + (active ? (v > maxE * 0.8 ? ' hot' : ' active') : '');
+    // Use per-tone threshold if available
+    let thr = diag.threshold;
+    let usable = true;
+    if (diag.perToneCal) {
+      thr = diag.perToneCal.threshold[i];
+      usable = diag.perToneCal.usable[i];
+    }
+    const active = usable && v > thr;
+    const dead = !usable;
+    bars[i].className = 'energy-bar' + (dead ? '' : active ? (v > maxE * 0.8 ? ' hot' : ' active') : '');
+    bars[i].style.opacity = dead ? '0.3' : '1';
+    bars[i].title = `T${i}: ${1400 + i*400}Hz E=${v.toExponential(2)} thr=${thr === Infinity ? '∞' : thr.toExponential(2)}${dead ? ' [DEAD]' : ''}`;
   }
 }
 
@@ -522,7 +533,10 @@ function drawHeatmap() {
   for (let c = 0; c < cols; c++) {
     for (let r = 0; r < rows; r++) {
       const v = hist[c][r] / gmax;
-      const active = hist[c][r] > diag.threshold;
+      // Use per-tone threshold if calibrated
+      let thr = diag.threshold;
+      if (diag.perToneCal && diag.perToneCal.usable[r]) thr = diag.perToneCal.threshold[r];
+      const active = diag.perToneCal ? (diag.perToneCal.usable[r] && hist[c][r] > thr) : (hist[c][r] > diag.threshold);
       if (active) {
         const intensity = Math.min(255, Math.floor(v * 255));
         ctx.fillStyle = `rgb(${Math.floor(intensity * 0.15)}, ${Math.floor(intensity * 0.4)}, ${intensity})`;
@@ -655,6 +669,25 @@ function generatePreamble() {
   }
   return out;
 }
+
+// Per-tone calibration sequence: 16 symbols, each with exactly ONE data tone active.
+// The receiver measures received energy at each frequency individually, building a
+// per-tone sensitivity profile. This accounts for speaker frequency response, mic
+// frequency response, room acoustics, and distance — all of which vary per-frequency.
+function generateCalibrationSequence() {
+  const out = new Float32Array(BITS_PER_SYMBOL * TOTAL_SYMBOL_SAMPLES);
+  let off = 0;
+  for (let t = 0; t < BITS_PER_SYMBOL; t++) {
+    const freq = TONES[t + 1]; // data tones start at index 1
+    for (let i = 0; i < SYMBOL_SAMPLES; i++) {
+      out[off + i] = TONE_AMPLITUDE * Math.sin(2 * Math.PI * freq * i / SAMPLE_RATE);
+    }
+    // guard interval is already zeros
+    off += TOTAL_SYMBOL_SAMPLES;
+  }
+  return out;
+}
+
 function generateSymbol(mask) {
   const out = new Float32Array(TOTAL_SYMBOL_SAMPLES);
   for (let i = 0; i < SYMBOL_SAMPLES; i++) {
@@ -664,11 +697,16 @@ function generateSymbol(mask) {
   }
   return out;
 }
+
 function encodeToAudio(frameBytes) {
   const pre = generatePreamble();
+  const cal = generateCalibrationSequence();
   const nSym = Math.ceil(frameBytes.length / BYTES_PER_SYMBOL);
-  const out = new Float32Array(pre.length + nSym * TOTAL_SYMBOL_SAMPLES);
-  out.set(pre, 0); let off = pre.length;
+  const totalLen = pre.length + cal.length + nSym * TOTAL_SYMBOL_SAMPLES;
+  const out = new Float32Array(totalLen);
+  out.set(pre, 0);
+  out.set(cal, pre.length);
+  let off = pre.length + cal.length;
   for (let s = 0; s < nSym; s++) {
     const bi = s * BYTES_PER_SYMBOL; let mask = 0;
     for (let b = 0; b < BYTES_PER_SYMBOL; b++) if (bi+b < frameBytes.length) mask |= frameBytes[bi+b] << (b*8);
@@ -730,7 +768,11 @@ class FSKDemodulator {
     this.symbolStart = 0;
     this.chipEnergies = [];
     this.firstChipPos = 0;
-    this.threshold = 0.005;
+    this.threshold = 0.005;           // legacy single threshold (fallback)
+    this.perToneThreshold = null;     // Float32Array(16) set during per-frame calibration
+    this.perToneEnergy = null;        // Float32Array(16) measured energy from cal symbols
+    this.perToneUsable = null;        // bool[16] — is this tone reliable?
+    this.calSymbolsRead = 0;          // counter during calibration phase
     this.symbolBuffer = [];
     this.expectedBytes = 0;
     this.decodedFrames = [];
@@ -826,6 +868,7 @@ class FSKDemodulator {
     this._grow(samples);
     if (this.state === 'scanning') this._scan();
     else if (this.state === 'preamble') this._trackPreamble();
+    else if (this.state === 'calibrating') this._calibrateTones();
     else if (this.state === 'data') this._decodeData();
     this._compact();
     const frames = this.decodedFrames;
@@ -1001,10 +1044,122 @@ class FSKDemodulator {
     plog(`Preamble lock (corr=${corr}, on/off=${bestRatio.toFixed(0)}×, shift=${shiftAmount}, thr=${this.threshold.toExponential(2)})`, 'success');
 
     this.symbolStart = this.firstChipPos + BARKER_13.length * TOTAL_SYMBOL_SAMPLES;
+    this.state = 'calibrating';
+    this.calSymbolsRead = 0;
+    this.perToneEnergy = new Float32Array(BITS_PER_SYMBOL);
+    this.perToneThreshold = new Float32Array(BITS_PER_SYMBOL);
+    this.perToneUsable = new Array(BITS_PER_SYMBOL).fill(true);
+    dlog(`→ CALIBRATING: expecting ${BITS_PER_SYMBOL} tone calibration symbols starting at sample ${this.symbolStart}`, 'state');
+    this._calibrateTones();
+  }
+
+  // ── PER-TONE CALIBRATION ──
+  // After preamble, the sender transmits 16 symbols, each with exactly one data
+  // tone active. We measure each tone's received energy individually. This gives
+  // us a per-frequency sensitivity map of the speaker→air→mic channel.
+  //
+  // Each tone gets its own threshold: toneEnergy * TONE_THRESHOLD_FACTOR.
+  // A tone with too little energy (< MIN_USABLE_TONE_ENERGY) is marked unusable.
+
+  _calibrateTones() {
+    while (this.calSymbolsRead < BITS_PER_SYMBOL) {
+      if (this.symbolStart + TOTAL_SYMBOL_SAMPLES > this.bufLen) return; // need more samples
+
+      const toneIdx = this.calSymbolsRead;
+      const expectedFreq = TONES[toneIdx + 1]; // data tones start at index 1
+
+      // Measure the expected tone's energy in this symbol
+      const targetEnergy = goertzelEnergy(this.buf, this.symbolStart, SYMBOL_SAMPLES, expectedFreq, SAMPLE_RATE);
+
+      // Also measure crosstalk: energy in all OTHER tones during this symbol
+      let maxCrosstalk = 0;
+      let crosstalkSum = 0;
+      for (let other = 0; other < BITS_PER_SYMBOL; other++) {
+        if (other === toneIdx) continue;
+        const otherFreq = TONES[other + 1];
+        const otherEnergy = goertzelEnergy(this.buf, this.symbolStart, SYMBOL_SAMPLES, otherFreq, SAMPLE_RATE);
+        crosstalkSum += otherEnergy;
+        if (otherEnergy > maxCrosstalk) maxCrosstalk = otherEnergy;
+      }
+      const avgCrosstalk = crosstalkSum / (BITS_PER_SYMBOL - 1);
+
+      this.perToneEnergy[toneIdx] = targetEnergy;
+
+      // Threshold = midpoint between expected signal and worst-case crosstalk,
+      // biased toward the crosstalk side (safer — avoids false positives)
+      const TONE_THRESHOLD_FACTOR = 0.25; // fraction of measured tone energy
+      const MIN_USABLE_TONE_ENERGY = 0.01; // absolute minimum
+      const MIN_SIGNAL_CROSSTALK_RATIO = 3; // tone must be 3× above crosstalk
+
+      if (targetEnergy < MIN_USABLE_TONE_ENERGY) {
+        this.perToneUsable[toneIdx] = false;
+        this.perToneThreshold[toneIdx] = Infinity; // never triggers
+      } else if (targetEnergy < maxCrosstalk * MIN_SIGNAL_CROSSTALK_RATIO) {
+        this.perToneUsable[toneIdx] = false;
+        this.perToneThreshold[toneIdx] = Infinity;
+      } else {
+        this.perToneUsable[toneIdx] = true;
+        // Threshold between crosstalk ceiling and signal floor
+        this.perToneThreshold[toneIdx] = Math.max(
+          targetEnergy * TONE_THRESHOLD_FACTOR,
+          maxCrosstalk * 2 // at least 2× the worst crosstalk
+        );
+      }
+
+      if (DEBUG) {
+        const status = this.perToneUsable[toneIdx] ? '✓' : '✗';
+        const thr = this.perToneUsable[toneIdx] ? this.perToneThreshold[toneIdx].toExponential(2) : 'DEAD';
+        dlog(`  cal[${toneIdx}] ${TONES[toneIdx+1]}Hz: E=${targetEnergy.toExponential(2)} ` +
+             `xtalk_max=${maxCrosstalk.toExponential(2)} xtalk_avg=${avgCrosstalk.toExponential(2)} ` +
+             `thr=${thr} ${status}`, targetEnergy < MIN_USABLE_TONE_ENERGY ? 'error' : 'debug');
+      }
+
+      this.calSymbolsRead++;
+      this.symbolStart += TOTAL_SYMBOL_SAMPLES;
+    }
+
+    // All 16 calibration symbols processed
+    const usableCount = this.perToneUsable.filter(u => u).length;
+    const deadTones = [];
+    for (let i = 0; i < BITS_PER_SYMBOL; i++) {
+      if (!this.perToneUsable[i]) deadTones.push(`${TONES[i+1]}Hz`);
+    }
+
+    // Update legacy single threshold to median of usable per-tone thresholds (for diagnostics)
+    const usableThresholds = [];
+    for (let i = 0; i < BITS_PER_SYMBOL; i++) {
+      if (this.perToneUsable[i]) usableThresholds.push(this.perToneThreshold[i]);
+    }
+    if (usableThresholds.length > 0) {
+      usableThresholds.sort((a,b) => a-b);
+      this.threshold = usableThresholds[Math.floor(usableThresholds.length / 2)];
+    }
+    diag.threshold = this.threshold;
+
+    // Diagnostic summary
+    const eMin = Math.min(...this.perToneEnergy);
+    const eMax = Math.max(...this.perToneEnergy);
+    const eRange = eMax / Math.max(eMin, 1e-10);
+    dlog(`✓ TONE CALIBRATION COMPLETE`, 'success');
+    dlog(`  Usable: ${usableCount}/${BITS_PER_SYMBOL} tones`, usableCount < 12 ? 'warn' : 'success');
+    if (deadTones.length > 0) dlog(`  Dead tones: ${deadTones.join(', ')}`, 'error');
+    dlog(`  Energy range: ${eMin.toExponential(2)} – ${eMax.toExponential(2)} (${eRange.toFixed(1)}× spread)`, 'debug');
+    dlog(`  Per-tone thresholds: [${Array.from(this.perToneThreshold).map(t => t === Infinity ? '∞' : t.toExponential(1)).join(', ')}]`, 'debug');
+    plog(`Tone cal: ${usableCount}/${BITS_PER_SYMBOL} usable, E range ${eRange.toFixed(0)}×, ${deadTones.length} dead`, usableCount >= 12 ? 'progress' : 'warn');
+
+    if (DEBUG) {
+      // Update diagnostic displays
+      diag.toneEnergies.set(this.perToneEnergy);
+      // Store calibration profile separately for display
+      diag.perToneCal = { energy: Array.from(this.perToneEnergy), threshold: Array.from(this.perToneThreshold), usable: [...this.perToneUsable] };
+    }
+
+    // Transition to data decoding
     this.state = 'data';
     this.symbolBuffer = [];
     this.expectedBytes = 0;
     diag.symbolCount = 0;
+    dlog(`→ DATA: decoding starts at sample ${this.symbolStart}`, 'state');
     this._decodeData();
   }
 
@@ -1022,7 +1177,11 @@ class FSKDemodulator {
       for (let bit = 0; bit < BITS_PER_SYMBOL; bit++) {
         const e = goertzelEnergy(this.buf, this.symbolStart, SYMBOL_SAMPLES, TONES[bit+1], SAMPLE_RATE);
         energies[bit] = e;
-        if (e > this.threshold) mask |= (1 << bit);
+        // Use per-tone threshold if calibrated, otherwise fall back to single threshold
+        const thr = (this.perToneThreshold && this.perToneUsable && this.perToneUsable[bit])
+          ? this.perToneThreshold[bit]
+          : this.threshold;
+        if (e > thr) mask |= (1 << bit);
       }
 
       if (DEBUG) {
@@ -1039,7 +1198,11 @@ class FSKDemodulator {
 
       if (TRACE) {
         const bits = mask.toString(2).padStart(16, '0');
-        const eStr = Array.from(energies).map(e => e > this.threshold ? '█' : '░').join('');
+        const eStr = Array.from(energies).map((e, i) => {
+          const thr = (this.perToneThreshold && this.perToneUsable && this.perToneUsable[i])
+            ? this.perToneThreshold[i] : this.threshold;
+          return e > thr ? '█' : '░';
+        }).join('');
         dlog(`sym#${diag.symbolCount} mask=0x${mask.toString(16).padStart(4,'0')} bits=${bits} [${eStr}] → 0x${byte0.toString(16).padStart(2,'0')} 0x${byte1.toString(16).padStart(2,'0')}`, 'trace');
       }
 
@@ -1089,7 +1252,8 @@ class FSKDemodulator {
     this.buf = new Float32Array(0); this.bufLen = 0; this.state = 'scanning';
     this.symbolStart = 0; this.chipEnergies = []; this.firstChipPos = 0;
     this.symbolBuffer = []; this.expectedBytes = 0; this.decodedFrames = [];
-    this.scanPos = 0;
+    this.scanPos = 0; this.calSymbolsRead = 0;
+    this.perToneThreshold = null; this.perToneEnergy = null; this.perToneUsable = null;
     // Preserve noiseFloor and noiseProfile — they don't change between transfers
     this.scansSinceDetect = 0;
   }
@@ -1467,8 +1631,69 @@ window.runLoopbackTest = async function() {
   }
 
   try {
+    // Helper: feed audio through demod in worklet-sized chunks, collect decoded frames
+    function feedAndDecode(demod, audio) {
+      const decoded = [];
+      const crcFails = [];
+      for (let i = 0; i < audio.length; i += 128) {
+        const chunk = audio.subarray(i, Math.min(i + 128, audio.length));
+        for (const raw of demod.feedSamples(chunk)) {
+          const dec = decodeFrame(raw);
+          if (dec) decoded.push(dec);
+          else crcFails.push(raw);
+        }
+      }
+      return { decoded, crcFails };
+    }
+
+    // ── Test 0: Per-tone calibration sequence ──
+    plog('Test 0: Calibration sequence parsing', 'state');
+    {
+      const demod = new FSKDemodulator(null);
+      const payload = new Uint8Array([0xAA]); // 1 byte, trivial
+      const frame = encodeFrame(FRAME.DATA, 0, payload);
+      const audio = encodeToAudio(frame);
+
+      plog(`  Audio: ${audio.length} samples (preamble + 16 cal syms + ${Math.ceil(frame.length/BYTES_PER_SYMBOL)} data syms)`, 'debug');
+
+      const { decoded, crcFails } = feedAndDecode(demod, audio);
+
+      // Verify calibration happened
+      if (!demod.perToneThreshold) {
+        result('Cal: thresholds set', false, 'perToneThreshold is null — calibration never ran');
+      } else {
+        result('Cal: thresholds set', true);
+
+        // Verify all 16 tones are usable in loopback (perfect signal)
+        const usable = demod.perToneUsable.filter(u => u).length;
+        result('Cal: all tones usable', usable === BITS_PER_SYMBOL, `${usable}/${BITS_PER_SYMBOL} usable`);
+
+        // Verify thresholds are reasonable (in loopback, energy should be ~147456)
+        const minThr = Math.min(...demod.perToneThreshold);
+        const maxThr = Math.max(...demod.perToneThreshold);
+        result('Cal: threshold range', maxThr / minThr < 2.0,
+          `range ${minThr.toExponential(2)} – ${maxThr.toExponential(2)} (${(maxThr/minThr).toFixed(1)}× spread)`);
+
+        // Verify per-tone energies are consistent (should all be ~equal in loopback)
+        const minE = Math.min(...demod.perToneEnergy);
+        const maxE = Math.max(...demod.perToneEnergy);
+        result('Cal: energy uniformity', maxE / minE < 1.5,
+          `range ${minE.toExponential(2)} – ${maxE.toExponential(2)} (${(maxE/minE).toFixed(2)}× spread)`);
+
+        dlog(`  Per-tone energies: [${Array.from(demod.perToneEnergy).map(e => e.toExponential(2)).join(', ')}]`, 'debug');
+        dlog(`  Per-tone thresholds: [${Array.from(demod.perToneThreshold).map(t => t.toExponential(2)).join(', ')}]`, 'debug');
+      }
+
+      // The frame should still decode correctly after calibration
+      if (decoded.length !== 1) {
+        result('Cal: frame decoded', false, `${decoded.length} frames (expected 1), ${crcFails.length} CRC fails`);
+      } else {
+        result('Cal: frame decoded', decoded[0].payload[0] === 0xAA, `got 0x${decoded[0].payload[0].toString(16)}`);
+      }
+    }
+
     // ── Test 1: Single frame round-trip ──
-    plog('Test 1: Single frame encode → decode', 'state');
+    plog('Test 1: Single frame encode → decode (with calibration)', 'state');
     {
       const demod = new FSKDemodulator(null);
       const payload = new Uint8Array([0x48, 0x65, 0x6C, 0x6C, 0x6F]); // "Hello"
@@ -1789,7 +2014,7 @@ function resetDiag() {
   diag.logCount=0; diag.demodLogCount=0; diag.symbolCount=0; diag.noiseFloor=0;
   diag.waveformBuf.fill(0); diag.waveformPos=0;
   diag.spectrumBuf.fill(0); diag.toneEnergies.fill(0);
-  diag.heatmapHistory=[]; diag.txHexBytes=[]; diag.rxHexBytes=[];
+  diag.heatmapHistory=[]; diag.txHexBytes=[]; diag.rxHexBytes=[]; diag.perToneCal=null;
   document.getElementById('protocol-log').innerHTML='';
   document.getElementById('demod-log').innerHTML='';
   document.getElementById('tx-hex').innerHTML='';
