@@ -911,18 +911,75 @@ class FSKDemodulator {
     }
 
     // ═══ ALL GATES PASSED ═══
-    // Calibrate data detection threshold
-    // Data tones share amplitude across up to 16 simultaneous tones.
-    // Per-tone energy ≈ onAvg / 16² = onAvg/256 in the worst case (all tones on).
-    // Use geometric mean of ON/OFF scaled down, with a safety factor.
-    this.threshold = Math.sqrt(onAvg * Math.max(offAvg, 1e-10)) * 0.3;
+
+    // ── ALIGNMENT REFINEMENT ──
+    // The scan step is TOTAL_SYMBOL_SAMPLES/2, so firstChipPos can be off by up
+    // to half a symbol from the true chip boundary. This means every subsequent
+    // Goertzel window straddles two symbols, corrupting data bits.
+    //
+    // Fix: search around firstChipPos in fine steps, re-measure all 13 chips
+    // at each offset, pick the offset with the highest ON/OFF energy ratio.
+    // The correct alignment produces the sharpest ON/OFF separation.
+    //
+    // Search range: ±scanStep from current firstChipPos
+    // Step size: 256 samples (~5.3ms, giving ~5% of symbol precision)
+
+    const REFINE_STEP = 256;
+    const refineStart = Math.max(0, this.firstChipPos - this.scanStep);
+    const refineEnd = Math.min(this.firstChipPos + this.scanStep,
+      this.bufLen - BARKER_13.length * TOTAL_SYMBOL_SAMPLES - SYMBOL_SAMPLES);
+
+    let bestOffset = this.firstChipPos;
+    let bestRatio = 0;
+    let bestOnAvg = 0;
+    let bestOffAvg = 0;
+    let trialCount = 0;
+
+    for (let tryPos = refineStart; tryPos <= refineEnd; tryPos += REFINE_STEP) {
+      // Measure all 13 chips at this candidate offset
+      let trialOnSum = 0, trialOnCount = 0;
+      let trialOffSum = 0, trialOffCount = 0;
+
+      // Check we have enough buffer for all chips
+      const lastChipEnd = tryPos + (BARKER_13.length - 1) * TOTAL_SYMBOL_SAMPLES + SYMBOL_SAMPLES;
+      if (lastChipEnd > this.bufLen) continue;
+
+      for (let c = 0; c < BARKER_13.length; c++) {
+        const chipPos = tryPos + c * TOTAL_SYMBOL_SAMPLES;
+        const e = goertzelEnergy(this.buf, chipPos, SYMBOL_SAMPLES, PREAMBLE_TONE, SAMPLE_RATE);
+        if (BARKER_13[c] === 1) { trialOnSum += e; trialOnCount++; }
+        else { trialOffSum += e; trialOffCount++; }
+      }
+
+      const trialOnAvg = trialOnCount > 0 ? trialOnSum / trialOnCount : 0;
+      const trialOffAvg = trialOffCount > 0 ? trialOffSum / trialOffCount : 1e-10;
+      const trialRatio = trialOnAvg / Math.max(trialOffAvg, 1e-10);
+      trialCount++;
+
+      if (trialRatio > bestRatio) {
+        bestRatio = trialRatio;
+        bestOffset = tryPos;
+        bestOnAvg = trialOnAvg;
+        bestOffAvg = trialOffAvg;
+      }
+    }
+
+    const shiftAmount = bestOffset - this.firstChipPos;
+    this.firstChipPos = bestOffset;
+
+    dlog(`⊕ Alignment refined: shift=${shiftAmount} samples (${(shiftAmount/SAMPLE_RATE*1000).toFixed(1)}ms), ` +
+         `tested ${trialCount} offsets, ON/OFF ratio ${onOffRatio.toFixed(1)} → ${bestRatio.toFixed(1)}`, 'success');
+
+    // Re-calibrate threshold from the refined alignment
+    const refinedOnAvg = bestOnAvg;
+    const refinedOffAvg = bestOffAvg;
+    this.threshold = Math.sqrt(refinedOnAvg * Math.max(refinedOffAvg, 1e-10)) * 0.3;
     diag.threshold = this.threshold;
 
-    dlog(`✓ PREAMBLE ACCEPTED`, 'success');
-    dlog(`  Barker corr=${corr}/13, ON/OFF=${onOffRatio.toFixed(1)}×, ON/noise=${onNoiseRatio.toFixed(0)}×`, 'success');
-    dlog(`  onAvg=${onAvg.toExponential(2)} offAvg=${offAvg.toExponential(2)} threshold=${this.threshold.toExponential(2)}`, 'debug');
-    dlog(`  Chips: [${this.chipEnergies.map(e => e.toExponential(1)).join(', ')}]`, 'debug');
-    plog(`Preamble lock (corr=${corr}, on/off=${onOffRatio.toFixed(0)}×, thr=${this.threshold.toExponential(2)})`, 'success');
+    dlog(`✓ PREAMBLE ACCEPTED (refined)`, 'success');
+    dlog(`  Barker corr=${corr}/13, ON/OFF=${bestRatio.toFixed(1)}×, ON/noise=${(refinedOnAvg / Math.max(this.noiseFloor, 1e-10)).toFixed(0)}×`, 'success');
+    dlog(`  onAvg=${refinedOnAvg.toExponential(2)} offAvg=${refinedOffAvg.toExponential(2)} threshold=${this.threshold.toExponential(2)}`, 'debug');
+    plog(`Preamble lock (corr=${corr}, on/off=${bestRatio.toFixed(0)}×, shift=${shiftAmount}, thr=${this.threshold.toExponential(2)})`, 'success');
 
     this.symbolStart = this.firstChipPos + BARKER_13.length * TOTAL_SYMBOL_SAMPLES;
     this.state = 'data';
@@ -1075,16 +1132,46 @@ async function initAudio(needMic) {
         const dec = decodeFrame(raw);
         if (!dec) {
           diag.crcFail++;
-          const hdr = Array.from(raw.slice(0,6)).map(b=>b.toString(16).padStart(2,'0')).join(' ');
-          plog(`CRC FAIL (${raw.length}B) hdr=[${hdr}]`, 'error');
-          dlog(`CRC detail: raw[${raw.length}B] expected_crc=${crc32(raw.subarray(0,4+(raw[1]|(raw[2]<<8)))).toString(16)} got=${((raw[raw.length-4])|(raw[raw.length-3]<<8)|(raw[raw.length-2]<<16)|(raw[raw.length-1]<<24)>>>0).toString(16)}`, 'error');
+          const rawType = raw[0];
+          const rawLen = raw[1] | (raw[2] << 8);
+          const rawSeq = raw[3];
+          const typeName = FRAME_NAMES[rawType] || '0x'+rawType.toString(16);
+          const hdr = Array.from(raw.slice(0,8)).map(b=>b.toString(16).padStart(2,'0')).join(' ');
+
+          // Check if this is a frame type someone is waiting for
+          const waitingFor = frameWaiters.find(w => w.expectedType === rawType);
+
+          plog(`CRC FAIL on ${typeName} (${raw.length}B, payload_len=${rawLen}, seq=${rawSeq})${waitingFor ? ' ← EXPECTED FRAME TYPE!' : ''}`, 'error');
+          dlog(`CRC FAIL detail: hdr=[${hdr}]`, 'error');
+
+          // Compute what CRC should be
+          if (rawLen <= MAX_PAYLOAD && raw.length >= 4 + rawLen + 4) {
+            const expCrc = crc32(raw.subarray(0, 4 + rawLen));
+            const pe = 4 + rawLen;
+            const gotCrc = ((raw[pe])|(raw[pe+1]<<8)|(raw[pe+2]<<16)|(raw[pe+3]<<24)) >>> 0;
+            dlog(`  expected_crc=0x${expCrc.toString(16).padStart(8,'0')} got_crc=0x${gotCrc.toString(16).padStart(8,'0')}`, 'error');
+
+            // Count how many payload bytes differ from what would make CRC pass
+            // (This is indirect — we can't know the "correct" bytes, but we can
+            // check how many decoded bytes are outside normal ASCII range as a hint)
+            let nonAscii = 0;
+            for (let i = 4; i < 4 + rawLen; i++) {
+              if (raw[i] < 0x20 || raw[i] > 0x7e) nonAscii++;
+            }
+            dlog(`  payload: ${rawLen}B, ${nonAscii} non-ASCII bytes (${(nonAscii/rawLen*100).toFixed(0)}% corrupted estimate)`, 'error');
+          }
+
+          if (waitingFor) {
+            dlog(`  ⚠ This was the frame type we're waiting for — data corruption from alignment or noise`, 'error');
+          }
           continue;
         }
         diag.framesRx++;
         const name = FRAME_NAMES[dec.type] || '0x'+dec.type.toString(16);
-        plog(`RX frame: ${name} seq=${dec.seq} payload=${dec.payload.length}B`, 'progress');
+        plog(`RX frame: ${name} seq=${dec.seq} payload=${dec.payload.length}B ✓`, 'progress');
         const idx = frameWaiters.findIndex(w => w.expectedType === dec.type);
         if (idx !== -1) { const w = frameWaiters.splice(idx,1)[0]; clearTimeout(w.timer); w.resolve(dec); }
+        else { dlog(`  (no waiter for ${name} — unexpected or late frame)`, 'debug'); }
       }
     }
   };
