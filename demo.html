@@ -715,7 +715,7 @@ async function deriveTestBlock(seed,turn){ const inp=new Uint8Array(seed.length+
 //           Even if the ratio looks okay, the absolute ON level must be
 //           meaningfully above noise.
 
-const DETECT_ABSOLUTE_FLOOR = 0.5;  // Gate 1: minimum energy to even consider
+const DETECT_ABSOLUTE_FLOOR = 0.1;  // Gate 1: minimum energy to even consider
 const DETECT_NOISE_RATIO = 100;     // Gate 2: multiplier above noise floor
 const DETECT_BARKER_MIN = 11;       // Gate 3: minimum Barker correlation
 const DETECT_ONOFF_RATIO = 8;       // Gate 4: minimum ON/OFF energy ratio
@@ -788,21 +788,37 @@ class FSKDemodulator {
   }
 
   _updateNoiseFloor(energy) {
-    // Only update noise floor from low-energy windows (below detection threshold)
-    // This prevents real signals from inflating the noise floor
-    const detThreshold = Math.max(DETECT_ABSOLUTE_FLOOR, this.noiseFloor * DETECT_NOISE_RATIO * 0.5);
-    if (energy < detThreshold) {
-      this.noiseSamples++;
-      if (this.noiseSamples < 20) {
-        // Bootstrap: simple average for first 20 samples
-        this.noiseFloor = this.noiseFloor + (energy - this.noiseFloor) / this.noiseSamples;
-      } else {
-        // EMA after bootstrap
-        this.noiseFloor = this.noiseAlpha * energy + (1 - this.noiseAlpha) * this.noiseFloor;
-      }
-      // Floor the noise floor to prevent it from going to zero
-      this.noiseFloor = Math.max(this.noiseFloor, 1e-8);
+    // Only update noise floor from genuinely quiet windows.
+    // 
+    // BUG FIX: The old check used `energy < max(0.5, noiseFloor * 50)` which
+    // allowed energies up to 0.5 to update the floor. When the sender is
+    // transmitting and scan windows partially overlap tone symbols, they pick
+    // up energies of 0.001–0.05 — all below 0.5 but 10–100× the actual noise.
+    // This slowly inflated the floor from 1e-3 to 5e-2, blocking all subsequent
+    // preamble detection via gate2.
+    //
+    // Fix: Only accept samples within 10× of current noise floor. Anything
+    // higher is likely signal spillover. Also cap the maximum noise floor to
+    // prevent runaway inflation from any source.
+    
+    const MAX_NOISE_FLOOR = 0.01; // absolute cap — real noise is always below this
+    const UPDATE_RATIO = 10;      // only update from samples within 10× of current floor
+
+    if (energy > this.noiseFloor * UPDATE_RATIO) return; // too high, probably signal
+    if (energy > MAX_NOISE_FLOOR) return; // absolute sanity cap
+
+    this.noiseSamples++;
+    if (this.noiseSamples < 20) {
+      // Bootstrap: simple average for first 20 samples
+      this.noiseFloor = this.noiseFloor + (energy - this.noiseFloor) / this.noiseSamples;
+    } else {
+      // EMA after bootstrap
+      this.noiseFloor = this.noiseAlpha * energy + (1 - this.noiseAlpha) * this.noiseFloor;
     }
+    // Floor to prevent going to zero
+    this.noiseFloor = Math.max(this.noiseFloor, 1e-8);
+    // Cap to prevent inflation
+    this.noiseFloor = Math.min(this.noiseFloor, MAX_NOISE_FLOOR);
   }
 
   feedSamples(samples) {
@@ -922,27 +938,31 @@ class FSKDemodulator {
     // The correct alignment produces the sharpest ON/OFF separation.
     //
     // Search range: ±scanStep from current firstChipPos
-    // Step size: 256 samples (~5.3ms, giving ~5% of symbol precision)
+    // Step size: 240 samples (~5ms)
+    // Each trial checks bounds individually — no overly-restrictive refineEnd.
 
-    const REFINE_STEP = 256;
-    const refineStart = Math.max(0, this.firstChipPos - this.scanStep);
-    const refineEnd = Math.min(this.firstChipPos + this.scanStep,
-      this.bufLen - BARKER_13.length * TOTAL_SYMBOL_SAMPLES - SYMBOL_SAMPLES);
+    const REFINE_STEP = 240;
+    const refineRange = this.scanStep + REFINE_STEP; // search slightly beyond ±scanStep
+    const refineStart = Math.max(0, this.firstChipPos - refineRange);
+    const refineEnd = this.firstChipPos + refineRange;
+    // Each trial position needs: tryPos + 12 * TOTAL_SYMBOL_SAMPLES + SYMBOL_SAMPLES <= bufLen
+    // This is checked per-trial inside the loop.
 
     let bestOffset = this.firstChipPos;
-    let bestRatio = 0;
-    let bestOnAvg = 0;
-    let bestOffAvg = 0;
+    let bestRatio = onOffRatio; // start with the coarse ratio as baseline
+    let bestOnAvg = onAvg;
+    let bestOffAvg = offAvg;
     let trialCount = 0;
 
     for (let tryPos = refineStart; tryPos <= refineEnd; tryPos += REFINE_STEP) {
+      // Check we have enough buffer for all 13 chips at this trial position
+      const lastChipEnd = tryPos + (BARKER_13.length - 1) * TOTAL_SYMBOL_SAMPLES + SYMBOL_SAMPLES;
+      if (lastChipEnd > this.bufLen) continue;
+      if (tryPos < 0) continue;
+
       // Measure all 13 chips at this candidate offset
       let trialOnSum = 0, trialOnCount = 0;
       let trialOffSum = 0, trialOffCount = 0;
-
-      // Check we have enough buffer for all chips
-      const lastChipEnd = tryPos + (BARKER_13.length - 1) * TOTAL_SYMBOL_SAMPLES + SYMBOL_SAMPLES;
-      if (lastChipEnd > this.bufLen) continue;
 
       for (let c = 0; c < BARKER_13.length; c++) {
         const chipPos = tryPos + c * TOTAL_SYMBOL_SAMPLES;
@@ -967,18 +987,16 @@ class FSKDemodulator {
     const shiftAmount = bestOffset - this.firstChipPos;
     this.firstChipPos = bestOffset;
 
-    dlog(`⊕ Alignment refined: shift=${shiftAmount} samples (${(shiftAmount/SAMPLE_RATE*1000).toFixed(1)}ms), ` +
-         `tested ${trialCount} offsets, ON/OFF ratio ${onOffRatio.toFixed(1)} → ${bestRatio.toFixed(1)}`, 'success');
+    dlog(`⊕ Alignment: tested ${trialCount} offsets, shift=${shiftAmount} samples (${(shiftAmount/SAMPLE_RATE*1000).toFixed(1)}ms), ` +
+         `ON/OFF ${onOffRatio.toFixed(1)} → ${bestRatio.toFixed(1)}`, 'success');
 
-    // Re-calibrate threshold from the refined alignment
-    const refinedOnAvg = bestOnAvg;
-    const refinedOffAvg = bestOffAvg;
-    this.threshold = Math.sqrt(refinedOnAvg * Math.max(refinedOffAvg, 1e-10)) * 0.3;
+    // Calibrate threshold from the best alignment (or original if refinement didn't improve)
+    this.threshold = Math.sqrt(bestOnAvg * Math.max(bestOffAvg, 1e-10)) * 0.3;
     diag.threshold = this.threshold;
 
-    dlog(`✓ PREAMBLE ACCEPTED (refined)`, 'success');
-    dlog(`  Barker corr=${corr}/13, ON/OFF=${bestRatio.toFixed(1)}×, ON/noise=${(refinedOnAvg / Math.max(this.noiseFloor, 1e-10)).toFixed(0)}×`, 'success');
-    dlog(`  onAvg=${refinedOnAvg.toExponential(2)} offAvg=${refinedOffAvg.toExponential(2)} threshold=${this.threshold.toExponential(2)}`, 'debug');
+    dlog(`✓ PREAMBLE ACCEPTED`, 'success');
+    dlog(`  Barker corr=${corr}/13, ON/OFF=${bestRatio.toFixed(1)}×, ON/noise=${(bestOnAvg / Math.max(this.noiseFloor, 1e-10)).toFixed(0)}×`, 'success');
+    dlog(`  onAvg=${bestOnAvg.toExponential(2)} offAvg=${bestOffAvg.toExponential(2)} threshold=${this.threshold.toExponential(2)}`, 'debug');
     plog(`Preamble lock (corr=${corr}, on/off=${bestRatio.toFixed(0)}×, shift=${shiftAmount}, thr=${this.threshold.toExponential(2)})`, 'success');
 
     this.symbolStart = this.firstChipPos + BARKER_13.length * TOTAL_SYMBOL_SAMPLES;
