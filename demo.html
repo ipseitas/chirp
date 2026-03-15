@@ -972,76 +972,136 @@ class FSKDemodulator {
 
     // ═══ ALL GATES PASSED ═══
 
-    // ── ALIGNMENT REFINEMENT ──
-    // The scan step is TOTAL_SYMBOL_SAMPLES/2, so firstChipPos can be off by up
-    // to half a symbol from the true chip boundary. This means every subsequent
-    // Goertzel window straddles two symbols, corrupting data bits.
+    // ── TWO-PHASE ALIGNMENT ──
     //
-    // Fix: search around firstChipPos in fine steps, re-measure all 13 chips
-    // at each offset, pick the offset with the highest ON/OFF energy ratio.
-    // The correct alignment produces the sharpest ON/OFF separation.
+    // The scan step is TOTAL_SYMBOL_SAMPLES/2 (2160 samples), so firstChipPos
+    // can be off by up to 2160 samples from the true symbol boundary. Even a
+    // few hundred samples of misalignment causes the Goertzel window to straddle
+    // two symbols, corrupting every decoded byte.
     //
-    // Search range: ±scanStep from current firstChipPos
-    // Step size: 240 samples (~5ms)
-    // Each trial checks bounds individually — no overly-restrictive refineEnd.
+    // The old approach optimized ON/OFF ratio, but that metric is insensitive
+    // to alignment: a chip at 20% energy is still 100× above OFF level.
+    //
+    // NEW Phase 1 (coarse): Maximize the MINIMUM ON chip energy.
+    //   Correct alignment makes all ON chips roughly equal (60-80 range).
+    //   Misalignment makes chip 0 much weaker (13 vs 65). The minimum ON
+    //   energy is the sharpest indicator of misalignment.
+    //   Step: 120 samples (~2.5ms). Range: ±(scanStep + 480).
+    //
+    // NEW Phase 2 (fine): Peak-find on the first calibration tone.
+    //   After preamble comes a calibration symbol at a known frequency (1400Hz).
+    //   Search ±120 samples around the coarse-aligned position in steps of 24
+    //   (~0.5ms), find where that tone's energy peaks. This gives near-sample
+    //   precision because a single tone's Goertzel energy is sharply peaked
+    //   when the window exactly covers the tone burst.
 
-    const REFINE_STEP = 240;
-    const refineRange = this.scanStep + REFINE_STEP; // search slightly beyond ±scanStep
-    const refineStart = Math.max(0, this.firstChipPos - refineRange);
-    const refineEnd = this.firstChipPos + refineRange;
-    // Each trial position needs: tryPos + 12 * TOTAL_SYMBOL_SAMPLES + SYMBOL_SAMPLES <= bufLen
-    // This is checked per-trial inside the loop.
+    // Phase 1: Coarse alignment by maximizing minimum ON chip energy
+    const COARSE_STEP = 120;
+    const coarseRange = this.scanStep + 480;
+    const coarseStart = Math.max(0, this.firstChipPos - coarseRange);
+    const coarseEnd = this.firstChipPos + coarseRange;
 
     let bestOffset = this.firstChipPos;
-    let bestRatio = onOffRatio; // start with the coarse ratio as baseline
-    let bestOnAvg = onAvg;
-    let bestOffAvg = offAvg;
-    let trialCount = 0;
+    let bestMinOn = 0;
+    let bestOnAvgCoarse = onAvg;
+    let bestOffAvgCoarse = offAvg;
+    let coarseTrials = 0;
 
-    for (let tryPos = refineStart; tryPos <= refineEnd; tryPos += REFINE_STEP) {
-      // Check we have enough buffer for all 13 chips at this trial position
+    for (let tryPos = coarseStart; tryPos <= coarseEnd; tryPos += COARSE_STEP) {
       const lastChipEnd = tryPos + (BARKER_13.length - 1) * TOTAL_SYMBOL_SAMPLES + SYMBOL_SAMPLES;
-      if (lastChipEnd > this.bufLen) continue;
-      if (tryPos < 0) continue;
+      if (lastChipEnd > this.bufLen || tryPos < 0) continue;
 
-      // Measure all 13 chips at this candidate offset
+      let minOnE = Infinity;
       let trialOnSum = 0, trialOnCount = 0;
       let trialOffSum = 0, trialOffCount = 0;
 
       for (let c = 0; c < BARKER_13.length; c++) {
         const chipPos = tryPos + c * TOTAL_SYMBOL_SAMPLES;
         const e = goertzelEnergy(this.buf, chipPos, SYMBOL_SAMPLES, PREAMBLE_TONE, SAMPLE_RATE);
-        if (BARKER_13[c] === 1) { trialOnSum += e; trialOnCount++; }
-        else { trialOffSum += e; trialOffCount++; }
+        if (BARKER_13[c] === 1) {
+          trialOnSum += e; trialOnCount++;
+          if (e < minOnE) minOnE = e;
+        } else {
+          trialOffSum += e; trialOffCount++;
+        }
       }
 
-      const trialOnAvg = trialOnCount > 0 ? trialOnSum / trialOnCount : 0;
-      const trialOffAvg = trialOffCount > 0 ? trialOffSum / trialOffCount : 1e-10;
-      const trialRatio = trialOnAvg / Math.max(trialOffAvg, 1e-10);
-      trialCount++;
-
-      if (trialRatio > bestRatio) {
-        bestRatio = trialRatio;
+      coarseTrials++;
+      if (minOnE > bestMinOn) {
+        bestMinOn = minOnE;
         bestOffset = tryPos;
-        bestOnAvg = trialOnAvg;
-        bestOffAvg = trialOffAvg;
+        bestOnAvgCoarse = trialOnCount > 0 ? trialOnSum / trialOnCount : 0;
+        bestOffAvgCoarse = trialOffCount > 0 ? trialOffSum / trialOffCount : 1e-10;
       }
     }
 
-    const shiftAmount = bestOffset - this.firstChipPos;
+    const coarseShift = bestOffset - this.firstChipPos;
     this.firstChipPos = bestOffset;
 
-    dlog(`⊕ Alignment: tested ${trialCount} offsets, shift=${shiftAmount} samples (${(shiftAmount/SAMPLE_RATE*1000).toFixed(1)}ms), ` +
-         `ON/OFF ${onOffRatio.toFixed(1)} → ${bestRatio.toFixed(1)}`, 'success');
+    dlog(`⊕ Phase 1 (coarse): ${coarseTrials} trials, shift=${coarseShift} (${(coarseShift/SAMPLE_RATE*1000).toFixed(1)}ms), ` +
+         `minON: ${onE.reduce((a,b)=>Math.min(a,b),Infinity).toExponential(2)} → ${bestMinOn.toExponential(2)}`, 'success');
 
-    // Calibrate threshold from the best alignment (or original if refinement didn't improve)
-    this.threshold = Math.sqrt(bestOnAvg * Math.max(bestOffAvg, 1e-10)) * 0.3;
+    // Phase 2: Fine alignment using first calibration tone (1400 Hz)
+    // The calibration sequence starts right after the preamble.
+    // First cal symbol is a single tone at TONES[1] = 1400 Hz.
+    const calStartCoarse = this.firstChipPos + BARKER_13.length * TOTAL_SYMBOL_SAMPLES;
+    const FINE_STEP = 24; // ~0.5ms
+    const fineRange = COARSE_STEP + FINE_STEP; // search slightly beyond one coarse step
+    const fineStart = Math.max(0, calStartCoarse - fineRange);
+    const fineEnd = calStartCoarse + fineRange;
+    const calToneFreq = TONES[1]; // 1400 Hz, first data tone
+
+    let bestFinePos = calStartCoarse;
+    let bestFineEnergy = 0;
+    let fineTrials = 0;
+
+    for (let tryPos = fineStart; tryPos <= fineEnd; tryPos += FINE_STEP) {
+      if (tryPos + SYMBOL_SAMPLES > this.bufLen || tryPos < 0) continue;
+      const e = goertzelEnergy(this.buf, tryPos, SYMBOL_SAMPLES, calToneFreq, SAMPLE_RATE);
+      fineTrials++;
+      if (e > bestFineEnergy) {
+        bestFineEnergy = e;
+        bestFinePos = tryPos;
+      }
+    }
+
+    // The fine offset tells us where the first calibration symbol's energy peaks.
+    // Derive the preamble start from this: calStart = firstChipPos + 13 * TOTAL_SYMBOL_SAMPLES
+    // So firstChipPos = calStart - 13 * TOTAL_SYMBOL_SAMPLES
+    const fineCalStart = bestFinePos;
+    const finePreambleStart = fineCalStart - BARKER_13.length * TOTAL_SYMBOL_SAMPLES;
+    const fineShift = finePreambleStart - this.firstChipPos;
+
+    if (finePreambleStart >= 0) {
+      this.firstChipPos = finePreambleStart;
+      dlog(`⊕ Phase 2 (fine): ${fineTrials} trials, additional shift=${fineShift} (${(fineShift/SAMPLE_RATE*1000).toFixed(1)}ms), ` +
+           `cal tone E: ${bestFineEnergy.toExponential(2)}`, 'success');
+    } else {
+      dlog(`⊕ Phase 2 (fine): ${fineTrials} trials, skipped (would go before buffer start)`, 'debug');
+    }
+
+    const totalShift = this.firstChipPos - (this.firstChipPos - coarseShift - fineShift); // net shift from original
+    const netShift = coarseShift + (finePreambleStart >= 0 ? fineShift : 0);
+
+    // Recompute ON/OFF from final alignment for threshold
+    let finalOnSum = 0, finalOnCount = 0, finalOffSum = 0, finalOffCount = 0;
+    for (let c = 0; c < BARKER_13.length; c++) {
+      const chipPos = this.firstChipPos + c * TOTAL_SYMBOL_SAMPLES;
+      if (chipPos + SYMBOL_SAMPLES > this.bufLen) break;
+      const e = goertzelEnergy(this.buf, chipPos, SYMBOL_SAMPLES, PREAMBLE_TONE, SAMPLE_RATE);
+      if (BARKER_13[c] === 1) { finalOnSum += e; finalOnCount++; }
+      else { finalOffSum += e; finalOffCount++; }
+    }
+    const finalOnAvg = finalOnCount > 0 ? finalOnSum / finalOnCount : bestOnAvgCoarse;
+    const finalOffAvg = finalOffCount > 0 ? finalOffSum / finalOffCount : bestOffAvgCoarse;
+    const finalRatio = finalOnAvg / Math.max(finalOffAvg, 1e-10);
+
+    this.threshold = Math.sqrt(finalOnAvg * Math.max(finalOffAvg, 1e-10)) * 0.3;
     diag.threshold = this.threshold;
 
-    dlog(`✓ PREAMBLE ACCEPTED`, 'success');
-    dlog(`  Barker corr=${corr}/13, ON/OFF=${bestRatio.toFixed(1)}×, ON/noise=${(bestOnAvg / Math.max(this.noiseFloor, 1e-10)).toFixed(0)}×`, 'success');
-    dlog(`  onAvg=${bestOnAvg.toExponential(2)} offAvg=${bestOffAvg.toExponential(2)} threshold=${this.threshold.toExponential(2)}`, 'debug');
-    plog(`Preamble lock (corr=${corr}, on/off=${bestRatio.toFixed(0)}×, shift=${shiftAmount}, thr=${this.threshold.toExponential(2)})`, 'success');
+    dlog(`✓ PREAMBLE ACCEPTED (total shift=${netShift}, ${(netShift/SAMPLE_RATE*1000).toFixed(1)}ms)`, 'success');
+    dlog(`  Final ON/OFF=${finalRatio.toFixed(1)}×, onAvg=${finalOnAvg.toExponential(2)}, offAvg=${finalOffAvg.toExponential(2)}`, 'debug');
+    plog(`Preamble lock (corr=${corr}, shift=${netShift}/${(netShift/SAMPLE_RATE*1000).toFixed(1)}ms, on/off=${finalRatio.toFixed(0)}×)`, 'success');
 
     this.symbolStart = this.firstChipPos + BARKER_13.length * TOTAL_SYMBOL_SAMPLES;
     this.state = 'calibrating';
@@ -1049,7 +1109,7 @@ class FSKDemodulator {
     this.perToneEnergy = new Float32Array(BITS_PER_SYMBOL);
     this.perToneThreshold = new Float32Array(BITS_PER_SYMBOL);
     this.perToneUsable = new Array(BITS_PER_SYMBOL).fill(true);
-    dlog(`→ CALIBRATING: expecting ${BITS_PER_SYMBOL} tone calibration symbols starting at sample ${this.symbolStart}`, 'state');
+    dlog(`→ CALIBRATING: expecting ${BITS_PER_SYMBOL} cal symbols at sample ${this.symbolStart}`, 'state');
     this._calibrateTones();
   }
 
